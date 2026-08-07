@@ -19,10 +19,19 @@ const CUBOID_MAX_DM = 4;
 const CUBOID_SEARCH_MAX_DM = 16;
 const STACK_CONTENT_BOUNDS = { minX: 8, minY: 0, maxX: 172, maxY: 72 };
 const CONTENT_LABEL_PADDING = 22;
-const TOOLBAR_RESERVE = 48;
 const VIEWPORT_SAFETY = 0.92;
 const MIN_FIT_SCALE = 0.75;
-const SNAP_THRESHOLD = 10;
+// Posun o (+1, −3, +1) krychle vyjde v této projekci na obrazovce jen o 1 px, takže na
+// jedno místo padá víc buněk mřížky. Kandidáty v tomto okruhu považujeme za shodné.
+const SNAP_TIE_TOLERANCE = 3;
+const CONFETTI_COLORS = [
+  "#059669",
+  "#10b981",
+  "#34d399",
+  "#6ee7b7",
+  "#047857",
+  "#a7f3d0",
+];
 
 // Kvádrový drátěný model ve vašem SVG má přední hranu délky 116 (0.5 -> 116.5).
 // Aby se do ní vešly přesně 4 velké krychle, musí být 1 „krychlová jednotka“ = 116 / 4 = 29.
@@ -65,18 +74,26 @@ const diagram = document.getElementById("diagram");
 const diagramBg = document.getElementById("diagram-bg");
 const diagramWrap = document.getElementById("diagram-wrap");
 const stage = document.getElementById("stage");
+const appRoot = document.getElementById("app-root");
+const modeCuboidBtn = document.getElementById("mode-cuboid-btn");
+const modeFreeBtn = document.getElementById("mode-free-btn");
+const cuboidPanel = document.getElementById("cuboid-panel");
+const freePanel = document.getElementById("free-panel");
 const newCuboidBtn = document.getElementById("new-cuboid-btn");
-const freeSurfaceBtn = document.getElementById("free-surface-btn");
-const uiOverlay = document.querySelector(".ui-overlay");
-const cuboidSizeQuiz = document.getElementById("cuboid-size-quiz");
 const cuboidWidthInput = document.getElementById("cuboid-width");
 const cuboidDepthInput = document.getElementById("cuboid-depth");
 const cuboidHeightInput = document.getElementById("cuboid-height");
-const applyCuboidSizeBtn = document.getElementById("apply-cuboid-size-btn");
-const volumeQuiz = document.getElementById("volume-quiz");
+const volumeAnswerRow = document.getElementById("volume-answer-row");
+const volumeFeedback = document.getElementById("volume-feedback");
 const volumeValueInput = document.getElementById("volume-value");
 const volumeUnitSelect = document.getElementById("volume-unit");
 const verifyBtn = document.getElementById("verify-btn");
+const volumeKeypadOverlay = document.getElementById("volume-keypad-overlay");
+const volumeKeypadDisplay = document.getElementById("volume-keypad-display");
+const volumeKeypadError = document.getElementById("volume-keypad-error");
+const volumeKeypadConfirm = document.getElementById("volume-keypad-confirm");
+const volumeKeypadCancel = document.getElementById("volume-keypad-cancel");
+const volumeMathKeypad = document.getElementById("volume-math-keypad");
 const content = document.getElementById("content");
 const placedCubesLayer = document.getElementById("placed-cubes");
 const cubeStack = document.getElementById("cube-stack");
@@ -92,6 +109,9 @@ const staticLayer = document.getElementById("static-layer");
 let dragState = null;
 let cubeCounter = 0;
 let isFreeSurfaceMode = false;
+let celebrationTimer = null;
+let volumeKeypadDraft = "";
+let isVolumeKeypadOpen = false;
 const occupancy = new Map();
 
 function occupancyKey(sx, sy, sz) {
@@ -122,19 +142,14 @@ function subGridToScreen(sx, sy, sz) {
   };
 }
 
-function screenToSubGrid(screenX, screenY) {
+// Jednomu bodu na obrazovce odpovídá v projekci celý paprsek, takže inverz je jednoznačný
+// až po zvolení patra. Pro dané sz je ale řešení přesné, což je základ přichytávání.
+function screenToSubGridAtLevel(screenX, screenY, sz) {
   const localX = screenX - cuboidOrigin.x;
   const localY = screenY - cuboidOrigin.y;
-  // Přibližný inverz k subGridToScreen (počítáme nejdřív hloubku ze svislé složky).
-  const syEst = -localY / (WIREFRAME_DEPTH_STEP / SUB);
-  const sxEst = (localX - syEst * (WIREFRAME_DEPTH_STEP / SUB)) / (WIREFRAME_UNIT / SUB);
-  const szEst = (-localY - syEst * (WIREFRAME_DEPTH_STEP / SUB)) / (WIREFRAME_HEIGHT_STEP / SUB);
-
-  return {
-    sx: Math.round(sxEst),
-    sy: Math.round(syEst),
-    sz: Math.round(szEst),
-  };
+  const sy = ((-localY - (sz / SUB) * WIREFRAME_HEIGHT_STEP) * SUB) / WIREFRAME_DEPTH_STEP;
+  const sx = ((localX - (sy / SUB) * WIREFRAME_DEPTH_STEP) * SUB) / WIREFRAME_UNIT;
+  return { sx, sy, sz };
 }
 
 function getCuboidSubSize() {
@@ -194,65 +209,81 @@ function canPlaceAt(sx, sy, sz, subSize, excludeId) {
   return true;
 }
 
-function alignSubCell(sx, sy, sz, subSize) {
-  if (subSize === 1) {
-    return { sx, sy, sz };
-  }
-  return {
-    sx: Math.round(sx / subSize) * subSize,
-    sy: Math.round(sy / subSize) * subSize,
-    sz: Math.round(sz / subSize) * subSize,
-  };
+// Vzdálenost ve směru pohledu. Menší hodnota = blíž k divákovi.
+function getCellFarness(sx, sy, sz) {
+  return (
+    sy -
+    (WIREFRAME_DEPTH_STEP / WIREFRAME_UNIT) * sx -
+    (WIREFRAME_DEPTH_STEP / WIREFRAME_HEIGHT_STEP) * sz
+  );
 }
 
-function snapSubPosition(sx, sy, sz, subSize, excludeId) {
-  const aligned = alignSubCell(sx, sy, sz, subSize);
-  sx = aligned.sx;
-  sy = aligned.sy;
-  sz = aligned.sz;
+function hasSupportBelow(sx, sy, sz, subSize, excludeId) {
+  if (sz === 0) {
+    return true;
+  }
+  for (let dy = 0; dy < subSize; dy += 1) {
+    for (let dx = 0; dx < subSize; dx += 1) {
+      const occupant = occupancy.get(occupancyKey(sx + dx, sy + dy, sz - 1));
+      if (occupant !== undefined && occupant !== excludeId) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
-  let best = { sx, sy, sz };
-  let bestDistance = Number.POSITIVE_INFINITY;
-  const searchRadius = 2;
+// Vrátí buňku mřížky, do které krychle patří. Prochází patra, v každém dopočítá přesné
+// sx/sy a okolí prověří jen kvůli obsazenosti.
+function findNearestCell(anchorX, anchorY, subSize, excludeId) {
+  const bounds = getCuboidSubSize();
+  const candidates = [];
+  let best = null;
 
-  for (let dz = -searchRadius; dz <= searchRadius; dz += 1) {
-    for (let dy = -searchRadius; dy <= searchRadius; dy += 1) {
-      for (let dx = -searchRadius; dx <= searchRadius; dx += 1) {
-        const candidate = {
-          sx: sx + dx,
-          sy: sy + dy,
-          sz: sz + dz,
-        };
+  const consider = (sx, sy, sz) => {
+    if (!canPlaceAt(sx, sy, sz, subSize, excludeId)) {
+      return;
+    }
+    const screen = subGridToScreen(sx, sy, sz);
+    const distance = Math.hypot(screen.x - anchorX, screen.y - anchorY);
+    const candidate = { sx, sy, sz, distance, screen };
+    if (!best || distance < best.distance) {
+      best = candidate;
+    }
+    candidates.push(candidate);
+  };
 
-        if (!canPlaceAt(candidate.sx, candidate.sy, candidate.sz, subSize, excludeId)) {
-          continue;
-        }
-
-        const screen = subGridToScreen(candidate.sx, candidate.sy, candidate.sz);
-        const requested = subGridToScreen(sx, sy, sz);
-        const distance = Math.hypot(screen.x - requested.x, screen.y - requested.y);
-
-        if (distance < bestDistance) {
-          bestDistance = distance;
-          best = candidate;
-        }
+  for (let sz = 0; sz <= bounds.height - subSize; sz += subSize) {
+    const exact = screenToSubGridAtLevel(anchorX, anchorY, sz);
+    const baseX = Math.round(exact.sx / subSize) * subSize;
+    const baseY = Math.round(exact.sy / subSize) * subSize;
+    for (let dy = -1; dy <= 1; dy += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        consider(baseX + dx * subSize, baseY + dy * subSize, sz);
       }
     }
   }
 
-  if (bestDistance > SNAP_THRESHOLD * 2) {
+  if (!best) {
     return null;
   }
 
-  return best;
-}
+  // Buňky, které padnou prakticky na stejný pixel jako vítěz, leží na paprsku pod
+  // kurzorem – z obrázku se mezi nimi vybrat nedá. Sousedy v řadě dělí 14 px, ty se sem
+  // tedy nedostanou.
+  const ray = candidates.filter(
+    (cell) =>
+      Math.hypot(cell.screen.x - best.screen.x, cell.screen.y - best.screen.y) <= SNAP_TIE_TOLERANCE,
+  );
+  // Vybíráme jako při stavění: krychle putuje po paprsku od diváka dozadu a zastaví se
+  // na první ploše, na kterou má dosednout. Když cestou žádnou nepotká, opře se úplně
+  // vzadu o stěnu kvádru. Rozhoduje jen poloha kurzoru, ne trasa, kudy se krychle vedla.
+  ray.sort((a, b) => getCellFarness(a.sx, a.sy, a.sz) - getCellFarness(b.sx, b.sy, b.sz));
+  const landing = ray.find((cell) =>
+    hasSupportBelow(cell.sx, cell.sy, cell.sz, subSize, excludeId),
+  );
 
-function getSnapDistance(anchorX, anchorY, snapped) {
-  if (!snapped) {
-    return Number.POSITIVE_INFINITY;
-  }
-  const screen = subGridToScreen(snapped.sx, snapped.sy, snapped.sz);
-  return Math.hypot(screen.x - anchorX, screen.y - anchorY);
+  return landing || ray[ray.length - 1];
 }
 
 function getCuboidScreenBoundsForSize(widthDm, depthDm, heightDm) {
@@ -320,55 +351,88 @@ function shouldSnapToCuboid(anchorX, anchorY) {
   );
 }
 
-function findNearestBigCubeCell(anchorX, anchorY, excludeId) {
-  const subSize = SUB;
+// Pohled na mřížku míří šikmo tak, že vzdalování od kamery znamená doleva, dozadu a dolů.
+// Blíž k divákovi je tedy krychle víc vpravo, víc vepředu a výš.
+function getCubePaintBox(element) {
+  const s = CUBE_TYPES[element.dataset.type].subSize;
+  const sx = Number(element.dataset.sx) || 0;
+  const sy = Number(element.dataset.sy) || 0;
+  const sz = Number(element.dataset.sz) || 0;
+  const u = WIREFRAME_UNIT / SUB;
+  const d = WIREFRAME_DEPTH_STEP / SUB;
+  const h = WIREFRAME_HEIGHT_STEP / SUB;
 
-  // Pro velkou krychli (cm³) je mřížka malá, takže můžeme vybrat nejbližší buňku přesně
-  // a tím umožnit přichytávání i "na sebe" (osa z) bez nepřesností inverzní projekce.
-  const bounds = getCuboidSubSize();
+  // Průmět krychle je šestiúhelník se třemi směry hran, takže na přesný test překryvu
+  // stačí porovnat rozsahy na osách x, y a x+y.
+  return {
+    sx,
+    sy,
+    sz,
+    s,
+    minX: sx * u + sy * d,
+    maxX: (sx + s) * u + (sy + s) * d,
+    minY: -(sz + s) * h - (sy + s) * d,
+    maxY: -sz * h - sy * d,
+    minS: sx * u - (sz + s) * h,
+    maxS: (sx + s) * u - sz * h,
+  };
+}
 
-  let best = null;
-  let bestDistance = Number.POSITIVE_INFINITY;
+function paintBoxesOverlap(a, b) {
+  const e = 0.01;
+  return (
+    a.minX < b.maxX - e &&
+    b.minX < a.maxX - e &&
+    a.minY < b.maxY - e &&
+    b.minY < a.maxY - e &&
+    a.minS < b.maxS - e &&
+    b.minS < a.maxS - e
+  );
+}
 
-  for (let sz = 0; sz <= bounds.height - subSize; sz += subSize) {
-    for (let sy = 0; sy <= bounds.depth - subSize; sy += subSize) {
-      for (let sx = 0; sx <= bounds.width - subSize; sx += subSize) {
-        if (!canPlaceAt(sx, sy, sz, subSize, excludeId)) {
-          continue;
-        }
-
-        const screen = subGridToScreen(sx, sy, sz);
-        const distance = Math.hypot(screen.x - anchorX, screen.y - anchorY);
-        if (distance < bestDistance) {
-          bestDistance = distance;
-          best = { sx, sy, sz, distance };
-        }
-      }
-    }
-  }
-
-  return best;
+// Dvě krychle v mřížce se nikdy neprotínají, takže je vždy dělí některá z os. Ta osa
+// pak jednoznačně říká, která je vzadu – a když se průměty opravdu překrývají, dají
+// všechny dělící osy stejnou odpověď.
+function isCubeBehind(a, b) {
+  return a.sx + a.s <= b.sx || a.sy >= b.sy + b.s || a.sz + a.s <= b.sz;
 }
 
 function sortPlacedCubes() {
-  const cubes = [...placedCubesLayer.querySelectorAll(".placed-cube")];
-  cubes.sort((a, b) => {
-    const ax = Number(a.dataset.sx);
-    const ay = Number(a.dataset.sy);
-    const az = Number(a.dataset.sz);
-    const bx = Number(b.dataset.sx);
-    const by = Number(b.dataset.sy);
-    const bz = Number(b.dataset.sz);
+  const items = [...placedCubesLayer.querySelectorAll(".placed-cube")].map((element) => ({
+    element,
+    box: getCubePaintBox(element),
+  }));
 
-    // Řazení od "nejvíc vzadu" k "nejvíc vpředu", aby přední bylo nakreslené (a klikatelné) navrchu.
-    // - větší hloubka (sy) = víc vzadu -> kreslit dřív
-    // - menší výška (sz) = níž -> kreslit dřív (vyšší krychle má být navrchu a uchopitelná)
-    // - potom jemně podle x
-    if (ay !== by) return by - ay; // sy desc
-    if (az !== bz) return az - bz; // sz asc
-    return ax - bx; // sx asc
-  });
-  cubes.forEach((cube) => placedCubesLayer.appendChild(cube));
+  // Hrubé předřazení podle vzdálenosti ve směru pohledu drží výsledek stabilní.
+  const xRatio = WIREFRAME_DEPTH_STEP / WIREFRAME_UNIT;
+  const zRatio = WIREFRAME_DEPTH_STEP / WIREFRAME_HEIGHT_STEP;
+  const farness = (box) => box.sy - xRatio * box.sx - zRatio * box.sz;
+  items.sort((p, q) => farness(q.box) - farness(p.box) || p.box.sx - q.box.sx);
+
+  // Malířův algoritmus: krychli vykreslíme až po všech, které jsou za ní a překrývají ji.
+  const state = new Array(items.length).fill(0);
+  const ordered = [];
+  const visit = (i) => {
+    if (state[i]) {
+      return;
+    }
+    state[i] = 1;
+    for (let j = 0; j < items.length; j += 1) {
+      if (j === i || state[j] || !paintBoxesOverlap(items[i].box, items[j].box)) {
+        continue;
+      }
+      if (isCubeBehind(items[j].box, items[i].box)) {
+        visit(j);
+      }
+    }
+    state[i] = 2;
+    ordered.push(items[i].element);
+  };
+  for (let i = 0; i < items.length; i += 1) {
+    visit(i);
+  }
+
+  placedCubesLayer.replaceChildren(...ordered);
 }
 
 function getCubeProjectionSize(cells) {
@@ -456,6 +520,13 @@ function setCubeScreenAnchor(element, anchorX, anchorY) {
     "transform",
     `translate(${anchorX - def.origin.x * def.scale}, ${anchorY - def.origin.y * def.scale})`,
   );
+  // Takhle leží krychle jen během tahu mimo kvádr. I tak jí souřadnice pro řazení
+  // dopočítáme z pozice na plátně, aby si nenesla ty z posledního přichycení.
+  const equivalent = screenToSubGridAtLevel(anchorX, anchorY, 0);
+  element.dataset.sx = String(equivalent.sx);
+  element.dataset.sy = String(equivalent.sy);
+  element.dataset.sz = "0";
+  element.dataset.snapped = "0";
 }
 function cubeTransformForGrid(type, sx, sy, sz) {
   const def = CUBE_TYPES[type];
@@ -467,6 +538,7 @@ function setCubeGridPosition(element, sx, sy, sz) {
   element.dataset.sx = String(sx);
   element.dataset.sy = String(sy);
   element.dataset.sz = String(sz);
+  element.dataset.snapped = "1";
   element.setAttribute("transform", cubeTransformForGrid(element.dataset.type, sx, sy, sz));
 }
 
@@ -560,32 +632,17 @@ function updateDrag(localX, localY) {
   const anchorY = localY - dragState.offsetY;
   const def = CUBE_TYPES[dragState.element.dataset.type];
   const excludeId = dragState.element.dataset.id;
-  const snapLimit = SNAP_THRESHOLD * 1.2;
 
-  if (!shouldSnapToCuboid(anchorX, anchorY)) {
-    setCubeScreenAnchor(dragState.element, anchorX, anchorY);
-    bringToFront(dragState.element);
-    return;
-  }
+  // Nad kvádrem se krychle drží mřížky, mimo něj volně sleduje kurzor a při puštění
+  // se vrátí do zásobníku.
+  const cell = shouldSnapToCuboid(anchorX, anchorY)
+    ? findNearestCell(anchorX, anchorY, def.subSize, excludeId)
+    : null;
 
-  // Velká krychle: najdeme nejbližší buňku v celé mřížce, aby fungovalo přichytávání
-  // i v ose z (skládání na sebe).
-  if (def.subSize === SUB) {
-    const best = findNearestBigCubeCell(anchorX, anchorY, excludeId);
-    if (best && best.distance <= snapLimit) {
-      setCubeGridPosition(dragState.element, best.sx, best.sy, best.sz);
-    } else {
-      setCubeScreenAnchor(dragState.element, anchorX, anchorY);
-    }
+  if (cell) {
+    setCubeGridPosition(dragState.element, cell.sx, cell.sy, cell.sz);
   } else {
-    const grid = screenToSubGrid(anchorX, anchorY);
-    const snapped = snapSubPosition(grid.sx, grid.sy, grid.sz, def.subSize, excludeId);
-    const distance = getSnapDistance(anchorX, anchorY, snapped);
-    if (snapped && distance <= snapLimit) {
-      setCubeGridPosition(dragState.element, snapped.sx, snapped.sy, snapped.sz);
-    } else {
-      setCubeScreenAnchor(dragState.element, anchorX, anchorY);
-    }
+    setCubeScreenAnchor(dragState.element, anchorX, anchorY);
   }
 
   bringToFront(dragState.element);
@@ -601,36 +658,25 @@ function endDrag() {
   const id = element.dataset.id;
   const anchor = getCubeScreenAnchor(element);
 
-  let snapped = null;
-  const snapLimit = SNAP_THRESHOLD * 1.2;
-
-  if (shouldSnapToCuboid(anchor.x, anchor.y)) {
-    if (def.subSize === SUB) {
-      const best = findNearestBigCubeCell(anchor.x, anchor.y, id);
-      if (best && best.distance <= snapLimit) {
-        snapped = { sx: best.sx, sy: best.sy, sz: best.sz };
-      }
-    } else {
-      const grid = screenToSubGrid(anchor.x, anchor.y);
-      const candidate = snapSubPosition(grid.sx, grid.sy, grid.sz, def.subSize, id);
-      const distance = getSnapDistance(anchor.x, anchor.y, candidate);
-      if (candidate && distance <= snapLimit) {
-        snapped = candidate;
-      }
-    }
-  }
-
-  if (snapped && canPlaceAt(snapped.sx, snapped.sy, snapped.sz, def.subSize, id)) {
-    setCubeGridPosition(element, snapped.sx, snapped.sy, snapped.sz);
-    markOccupied(snapped.sx, snapped.sy, snapped.sz, def.subSize, id);
-  } else {
-    setCubeScreenAnchor(element, anchor.x, anchor.y);
-  }
+  const cell = shouldSnapToCuboid(anchor.x, anchor.y)
+    ? findNearestCell(anchor.x, anchor.y, def.subSize, id)
+    : null;
 
   element.classList.remove("is-dragging");
   placedCubesLayer.classList.remove("is-dragging");
   diagram.classList.remove("is-dragging");
   dragState = null;
+
+  // Krychle existuje jen v mřížce. Puštěná mimo kvádr se vrací do zásobníku.
+  if (!cell) {
+    clearOccupied(id);
+    element.remove();
+    sortPlacedCubes();
+    return;
+  }
+
+  setCubeGridPosition(element, cell.sx, cell.sy, cell.sz);
+  markOccupied(cell.sx, cell.sy, cell.sz, def.subSize, id);
   sortPlacedCubes();
 }
 
@@ -711,7 +757,7 @@ function createLabel(text, x, y, anchor = "middle") {
   label.setAttribute("text-anchor", anchor);
   label.setAttribute("fill", "black");
   label.setAttribute("font-size", "10");
-  label.setAttribute("font-family", "system-ui, -apple-system, sans-serif");
+  label.setAttribute("font-family", "Fenomen Sans, ui-sans-serif, system-ui, sans-serif");
   label.setAttribute("font-weight", "500");
   return label;
 }
@@ -744,14 +790,10 @@ function isExactCuboidSize(widthDm, depthDm, heightDm) {
 }
 
 function getAvailableDiagramSize() {
-  const toolbar = document.querySelector(".ui-overlay");
   const stageRect = stage.getBoundingClientRect();
-  const toolbarHeight = toolbar ? toolbar.getBoundingClientRect().height : TOOLBAR_RESERVE;
-  const stageGap = 12;
-
   return {
     width: Math.max(200, stageRect.width),
-    height: Math.max(200, stageRect.height - toolbarHeight - stageGap),
+    height: Math.max(200, stageRect.height),
   };
 }
 
@@ -833,16 +875,14 @@ function clearPlacedCubes() {
   occupancy.clear();
 }
 
-function updateQuizPanelsVisibility() {
-  uiOverlay.classList.toggle("is-free-surface", isFreeSurfaceMode);
-  volumeQuiz.hidden = isFreeSurfaceMode;
-  cuboidSizeQuiz.hidden = isFreeSurfaceMode;
-}
-
 function updateToolbarModeState() {
-  newCuboidBtn.classList.toggle("is-active", !isFreeSurfaceMode);
-  freeSurfaceBtn.classList.toggle("is-active", isFreeSurfaceMode);
-  updateQuizPanelsVisibility();
+  modeCuboidBtn.classList.toggle("is-active", !isFreeSurfaceMode);
+  modeFreeBtn.classList.toggle("is-active", isFreeSurfaceMode);
+  modeCuboidBtn.setAttribute("aria-selected", String(!isFreeSurfaceMode));
+  modeFreeBtn.setAttribute("aria-selected", String(isFreeSurfaceMode));
+  appRoot.dataset.appMode = isFreeSurfaceMode ? "free" : "cuboid";
+  cuboidPanel.hidden = isFreeSurfaceMode;
+  freePanel.hidden = !isFreeSurfaceMode;
 }
 
 function getStackLocalBounds() {
@@ -911,10 +951,9 @@ function updateViewBox() {
     const bounds = getContentBounds();
     const contentW = bounds.maxX - bounds.minX;
     const contentH = bounds.maxY - bounds.minY;
-    const fitScale = Math.min(
-      (available.width * VIEWPORT_SAFETY) / contentW,
-      (available.height * VIEWPORT_SAFETY) / contentH,
-    );
+    // Stejné měřítko jako v módu kvádr – krychle mají na obrazovce stejnou velikost,
+    // i když je volná plocha větší (případně se plocha posouvá).
+    const fitScale = getFitScale();
     const displayWidth = contentW * fitScale;
     const displayHeight = contentH * fitScale;
 
@@ -1003,8 +1042,6 @@ function applyCuboidDimensions(widthDm, depthDm, heightDm, { clamp = true } = {}
 
 function enterFreeSurfaceMode() {
   if (isFreeSurfaceMode) {
-    exitFreeSurfaceMode();
-    updateViewBox();
     return;
   }
 
@@ -1016,6 +1053,10 @@ function enterFreeSurfaceMode() {
 }
 
 function exitFreeSurfaceMode() {
+  if (!isFreeSurfaceMode) {
+    return;
+  }
+
   isFreeSurfaceMode = false;
   resetCuboidOrigin();
   resetStackPosition();
@@ -1157,6 +1198,38 @@ function updateCuboidSizeInputs() {
   cuboidWidthInput.value = String(CUBOID.widthDm);
   cuboidDepthInput.value = String(CUBOID.depthDm);
   cuboidHeightInput.value = String(CUBOID.heightDm);
+  updateCuboidDimStepButtonsAll();
+}
+
+function updateCuboidDimStepButtons(input) {
+  const container = input.closest(".step-input");
+  if (!container) {
+    return;
+  }
+
+  const min = Number(input.min);
+  const max = Number(input.max);
+  const current = Number(input.value);
+  const value = Number.isFinite(current) ? current : min;
+
+  container.querySelector(".step-up").disabled = value >= max;
+  container.querySelector(".step-down").disabled = value <= min;
+}
+
+function updateCuboidDimStepButtonsAll() {
+  updateCuboidDimStepButtons(cuboidWidthInput);
+  updateCuboidDimStepButtons(cuboidDepthInput);
+  updateCuboidDimStepButtons(cuboidHeightInput);
+}
+
+function stepCuboidDim(input, delta) {
+  const min = Number(input.min);
+  const max = Number(input.max);
+  const current = Number(input.value);
+  const base = Number.isFinite(current) ? current : min;
+  input.value = String(Math.min(max, Math.max(min, base + delta)));
+  updateCuboidDimStepButtons(input);
+  applyCuboidSizeFromInputs();
 }
 
 function applyCuboidSizeFromInputs() {
@@ -1187,10 +1260,170 @@ function convertVolumeFromCm3(volumeCm3, unit) {
   return volumeCm3;
 }
 
+function clearCelebration() {
+  if (celebrationTimer) {
+    window.clearTimeout(celebrationTimer);
+    celebrationTimer = null;
+  }
+
+  document.querySelector(".quiz-celebration")?.remove();
+}
+
+function launchGreenConfetti() {
+  clearCelebration();
+
+  const layer = document.createElement("div");
+  layer.className = "quiz-celebration";
+  layer.setAttribute("aria-hidden", "true");
+
+  const burst = document.createElement("div");
+  burst.className = "quiz-confetti-burst";
+  layer.append(burst);
+
+  for (let i = 0; i < 80; i += 1) {
+    const piece = document.createElement("span");
+    piece.className = "quiz-confetti";
+    const angle = Math.random() * Math.PI * 2;
+    const distance = 120 + Math.random() * 280;
+    piece.style.setProperty("--burst-x", `${Math.cos(angle) * distance}px`);
+    piece.style.setProperty("--burst-y", `${Math.sin(angle) * distance}px`);
+    piece.style.setProperty("--rotation", `${Math.random() * 720 - 360}deg`);
+    piece.style.setProperty("--size", `${6 + Math.random() * 10}px`);
+    piece.style.background = CONFETTI_COLORS[i % CONFETTI_COLORS.length];
+    piece.style.animationDelay = `${Math.random() * 0.12}s`;
+    burst.append(piece);
+  }
+
+  document.body.append(layer);
+
+  celebrationTimer = window.setTimeout(() => {
+    clearCelebration();
+  }, 1800);
+}
+
+function parseVolumeInput(raw) {
+  const normalized = String(raw).trim().replace(",", ".");
+  if (!normalized) {
+    return Number.NaN;
+  }
+  return Number(normalized);
+}
+
+function formatVolumeDraft(raw) {
+  const trimmed = String(raw || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  const value = parseVolumeInput(trimmed);
+  if (!Number.isFinite(value)) {
+    return trimmed;
+  }
+  return String(value).replace(".", ",");
+}
+
+function clearVolumeKeypadError() {
+  volumeKeypadError.hidden = true;
+  volumeKeypadError.textContent = "";
+  volumeKeypadDisplay.classList.remove("is-invalid");
+}
+
+function showVolumeKeypadError(message) {
+  volumeKeypadError.hidden = false;
+  volumeKeypadError.textContent = message;
+  volumeKeypadDisplay.classList.add("is-invalid");
+}
+
+function validateVolumeKeypadDraft() {
+  const raw = volumeKeypadDraft.trim();
+  if (!raw) {
+    return { ok: true };
+  }
+  const value = parseVolumeInput(raw);
+  if (!Number.isFinite(value)) {
+    return { ok: false, message: "Zadej platné číslo." };
+  }
+  if (value < 0) {
+    return { ok: false, message: "Hodnota nemůže být záporná." };
+  }
+  return { ok: true };
+}
+
+function updateVolumeKeypadDisplay() {
+  volumeKeypadDisplay.textContent = volumeKeypadDraft;
+  const result = validateVolumeKeypadDraft();
+  if (!result.ok) {
+    showVolumeKeypadError(result.message);
+    return;
+  }
+  clearVolumeKeypadError();
+}
+
+function showVolumeKeypad() {
+  volumeKeypadDraft = volumeValueInput.value;
+  clearVolumeKeypadError();
+  updateVolumeKeypadDisplay();
+  volumeKeypadOverlay.hidden = false;
+  isVolumeKeypadOpen = true;
+  volumeValueInput.blur();
+}
+
+function hideVolumeKeypad() {
+  volumeKeypadDraft = "";
+  clearVolumeKeypadError();
+  volumeKeypadOverlay.hidden = true;
+  volumeKeypadDisplay.textContent = "";
+  isVolumeKeypadOpen = false;
+}
+
+function insertIntoVolumeKeypadDraft(value) {
+  if (value === "," || value === ".") {
+    if (volumeKeypadDraft.includes(",") || volumeKeypadDraft.includes(".")) {
+      return;
+    }
+  }
+  if (volumeKeypadDraft.length >= 12) {
+    return;
+  }
+  volumeKeypadDraft += value;
+  updateVolumeKeypadDisplay();
+}
+
+function clearVolumeKeypadDraft() {
+  volumeKeypadDraft = "";
+  updateVolumeKeypadDisplay();
+}
+
+function confirmVolumeKeypad() {
+  const result = validateVolumeKeypadDraft();
+  if (!result.ok) {
+    showVolumeKeypadError(result.message);
+    return;
+  }
+
+  volumeValueInput.value = formatVolumeDraft(volumeKeypadDraft);
+  hideVolumeKeypad();
+  resetVolumeQuizFeedback();
+}
+
+function handleVolumeKeypadClick(event) {
+  const key = event.currentTarget;
+  const action = key.getAttribute("data-action");
+  const value = key.getAttribute("data-value");
+
+  if (action === "clear") {
+    clearVolumeKeypadDraft();
+    return;
+  }
+
+  if (value) {
+    insertIntoVolumeKeypadDraft(value);
+  }
+}
+
 function resetVolumeQuizFeedback() {
-  volumeValueInput.classList.remove("is-correct", "is-wrong");
-  volumeUnitSelect.classList.remove("is-correct", "is-wrong");
-  verifyBtn.classList.remove("is-correct", "is-wrong");
+  volumeAnswerRow.classList.remove("is-correct", "is-wrong");
+  volumeFeedback.textContent = "";
+  volumeFeedback.classList.remove("is-correct", "is-wrong");
 }
 
 function resetVolumeQuiz() {
@@ -1199,23 +1432,32 @@ function resetVolumeQuiz() {
 }
 
 function verifyVolumeAnswer() {
-  const value = Number(volumeValueInput.value);
+  const value = parseVolumeInput(volumeValueInput.value);
   const unit = volumeUnitSelect.value;
 
   resetVolumeQuizFeedback();
 
   if (!Number.isFinite(value)) {
-    volumeValueInput.classList.add("is-wrong");
-    verifyBtn.classList.add("is-wrong");
+    volumeAnswerRow.classList.add("is-wrong");
+    volumeFeedback.classList.add("is-wrong");
+    volumeFeedback.textContent = "Zadej číslo.";
     return;
   }
 
   const expected = convertVolumeFromCm3(getCuboidVolumeCm3(), unit);
   const isCorrect = Math.abs(value - expected) < 0.001;
 
-  volumeValueInput.classList.add(isCorrect ? "is-correct" : "is-wrong");
-  volumeUnitSelect.classList.add(isCorrect ? "is-correct" : "is-wrong");
-  verifyBtn.classList.add(isCorrect ? "is-correct" : "is-wrong");
+  if (isCorrect) {
+    volumeAnswerRow.classList.add("is-correct");
+    volumeFeedback.classList.add("is-correct");
+    volumeFeedback.textContent = "Správně!";
+    launchGreenConfetti();
+    return;
+  }
+
+  volumeAnswerRow.classList.add("is-wrong");
+  volumeFeedback.classList.add("is-wrong");
+  volumeFeedback.textContent = "To není správně. Zkus to znovu.";
 }
 
 function generateRandomCuboid() {
@@ -1258,22 +1500,64 @@ function initCuboid() {
 initCuboid();
 initStackCubeScales();
 updateToolbarModeState();
+updateCuboidSizeInputs();
+modeCuboidBtn.addEventListener("click", () => {
+  if (isFreeSurfaceMode) {
+    generateRandomCuboid();
+  }
+});
+modeFreeBtn.addEventListener("click", enterFreeSurfaceMode);
 newCuboidBtn.addEventListener("click", generateRandomCuboid);
-applyCuboidSizeBtn.addEventListener("click", applyCuboidSizeFromInputs);
-freeSurfaceBtn.addEventListener("click", enterFreeSurfaceMode);
-verifyBtn.addEventListener("click", verifyVolumeAnswer);
+document.querySelectorAll(".step-btn[data-dim-input]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const input = document.getElementById(button.dataset.dimInput);
+    if (!input) {
+      return;
+    }
+
+    stepCuboidDim(input, button.classList.contains("step-up") ? 1 : -1);
+  });
+});
 [cuboidWidthInput, cuboidDepthInput, cuboidHeightInput].forEach((input) => {
+  input.addEventListener("input", updateCuboidDimStepButtonsAll);
+  input.addEventListener("change", applyCuboidSizeFromInputs);
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       applyCuboidSizeFromInputs();
     }
   });
 });
-volumeValueInput.addEventListener("input", resetVolumeQuizFeedback);
+volumeValueInput.addEventListener("pointerdown", (event) => {
+  event.preventDefault();
+  showVolumeKeypad();
+});
+volumeKeypadConfirm.addEventListener("click", confirmVolumeKeypad);
+volumeKeypadCancel.addEventListener("click", hideVolumeKeypad);
+volumeKeypadOverlay.addEventListener("click", (event) => {
+  if (event.target === volumeKeypadOverlay) {
+    hideVolumeKeypad();
+  }
+});
+verifyBtn.addEventListener("click", verifyVolumeAnswer);
 volumeUnitSelect.addEventListener("change", resetVolumeQuizFeedback);
-volumeValueInput.addEventListener("keydown", (event) => {
+volumeMathKeypad.querySelectorAll(".table-math-keypad__key").forEach((keyBtn) => {
+  keyBtn.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+  });
+  keyBtn.addEventListener("click", handleVolumeKeypadClick);
+});
+document.addEventListener("keydown", (event) => {
+  if (!isVolumeKeypadOpen) {
+    return;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    hideVolumeKeypad();
+    return;
+  }
   if (event.key === "Enter") {
-    verifyVolumeAnswer();
+    event.preventDefault();
+    confirmVolumeKeypad();
   }
 });
 window.addEventListener("resize", handleViewportChange);
