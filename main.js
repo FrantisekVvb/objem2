@@ -54,8 +54,6 @@ const CUBE_TYPES = {
     scale: CUBE_SCALE_TO_WIREFRAME,
     origin: CM_CUBE_ORIGIN,
     templateId: "cm-cube-shape",
-    fillTemplateId: "cm-cube-fill",
-    strokeTemplateId: "cm-cube-stroke",
     stackCenter: { x: 40.65, y: 41 },
     hit: { x: 18, y: 18, w: 46, h: 46 },
   },
@@ -64,8 +62,6 @@ const CUBE_TYPES = {
     scale: CUBE_SCALE_TO_WIREFRAME,
     origin: MM_CUBE_ORIGIN,
     templateId: "mm-cube-shape",
-    fillTemplateId: "mm-cube-fill",
-    strokeTemplateId: "mm-cube-stroke",
     stackCenter: { x: 125.5, y: 48 },
     hit: { x: 118, y: 42, w: 14, h: 14 },
   },
@@ -104,8 +100,6 @@ const volumeKeypadCancel = document.getElementById("volume-keypad-cancel");
 const volumeMathKeypad = document.getElementById("volume-math-keypad");
 const content = document.getElementById("content");
 const placedCubesLayer = document.getElementById("placed-cubes");
-const placedCubeFills = document.getElementById("placed-cube-fills");
-const placedCubeStrokes = document.getElementById("placed-cube-strokes");
 const cubeStack = document.getElementById("cube-stack");
 const cuboidExact = document.getElementById("cuboid-exact");
 const cuboidExactLabels = document.getElementById("cuboid-exact-labels");
@@ -428,24 +422,27 @@ function paintBoxesOverlap(a, b) {
 // Dvě krychle v mřížce se nikdy neprotínají, takže je vždy dělí některá z os. Ta osa
 // pak jednoznačně říká, která je vzadu – a když se průměty opravdu překrývají, dají
 // všechny dělící osy stejnou odpověď.
+// Výjimka: 1 mm³ je vždy vidět před 1 cm³, i když geometricky leží „za“ ní.
 function isCubeBehind(a, b) {
-  return a.sx + a.s <= b.sx || a.sy >= b.sy + b.s || a.sz + a.s <= b.sz;
-}
-
-// Výplně: mm³ zůstává vidět na ploše cm³. Hrany řadíme zvlášť geometricky.
-function isCubeBehindForFill(a, b) {
   if (a.s !== b.s) {
     return a.s > b.s;
   }
-  return isCubeBehind(a, b);
+  return a.sx + a.s <= b.sx || a.sy >= b.sy + b.s || a.sz + a.s <= b.sz;
 }
 
-function orderPaintItems(items, behindFn) {
+function sortPlacedCubes() {
+  const items = [...placedCubesLayer.querySelectorAll(".placed-cube")].map((element) => ({
+    element,
+    box: getCubePaintBox(element),
+  }));
+
+  // Hrubé předřazení podle vzdálenosti ve směru pohledu drží výsledek stabilní.
   const xRatio = WIREFRAME_DEPTH_STEP / WIREFRAME_UNIT;
   const zRatio = WIREFRAME_DEPTH_STEP / WIREFRAME_HEIGHT_STEP;
   const farness = (box) => box.sy - xRatio * box.sx - zRatio * box.sz;
   items.sort((p, q) => farness(q.box) - farness(p.box) || p.box.sx - q.box.sx);
 
+  // Malířův algoritmus: krychli vykreslíme až po všech, které jsou za ní a překrývají ji.
   const state = new Array(items.length).fill(0);
   const ordered = [];
   const visit = (i) => {
@@ -457,7 +454,7 @@ function orderPaintItems(items, behindFn) {
       if (j === i || state[j] || !paintBoxesOverlap(items[i].box, items[j].box)) {
         continue;
       }
-      if (behindFn(items[j].box, items[i].box)) {
+      if (isCubeBehind(items[j].box, items[i].box)) {
         visit(j);
       }
     }
@@ -467,50 +464,8 @@ function orderPaintItems(items, behindFn) {
   for (let i = 0; i < items.length; i += 1) {
     visit(i);
   }
-  return ordered;
-}
 
-function getCubeStrokeElement(fillElement) {
-  if (!fillElement) {
-    return null;
-  }
-  return placedCubeStrokes.querySelector(`.placed-cube-stroke[data-id="${fillElement.dataset.id}"]`);
-}
-
-function setCubeVisibility(fillElement, visible) {
-  if (visible) {
-    fillElement.removeAttribute("visibility");
-    getCubeStrokeElement(fillElement)?.removeAttribute("visibility");
-  } else {
-    fillElement.setAttribute("visibility", "hidden");
-    getCubeStrokeElement(fillElement)?.setAttribute("visibility", "hidden");
-  }
-}
-
-function removePlacedCube(fillElement) {
-  getCubeStrokeElement(fillElement)?.remove();
-  fillElement.remove();
-}
-
-function sortPlacedCubes() {
-  const fills = [...placedCubeFills.querySelectorAll(".placed-cube")].map((element) => ({
-    element,
-    box: getCubePaintBox(element),
-  }));
-  const fillOrder = orderPaintItems(fills, isCubeBehindForFill);
-  placedCubeFills.replaceChildren(...fillOrder);
-
-  const strokes = fillOrder.map((fill) => {
-    const stroke = getCubeStrokeElement(fill);
-    return stroke
-      ? {
-          element: stroke,
-          box: getCubePaintBox(fill),
-        }
-      : null;
-  }).filter(Boolean);
-  const strokeOrder = orderPaintItems(strokes, isCubeBehind);
-  placedCubeStrokes.replaceChildren(...strokeOrder);
+  placedCubesLayer.replaceChildren(...ordered);
 }
 
 function getCubeProjectionSize(cells) {
@@ -581,16 +536,10 @@ function pickPlacedCubeFromEvent(event) {
   return pickTopmostCubeAt(point.x, point.y);
 }
 
-function cloneCubeShape(type, part = "shape") {
+function cloneCubeShape(type) {
   const def = CUBE_TYPES[type];
-  const templateId =
-    part === "fill"
-      ? def.fillTemplateId
-      : part === "stroke"
-        ? def.strokeTemplateId
-        : def.templateId;
   const use = document.createElementNS(SVG_NS, "use");
-  use.setAttribute("href", `#${templateId}`);
+  use.setAttribute("href", `#${def.templateId}`);
   return use;
 }
 
@@ -605,9 +554,10 @@ function getCubeScreenAnchor(element) {
 
 function setCubeScreenAnchor(element, anchorX, anchorY) {
   const def = CUBE_TYPES[element.dataset.type];
-  const transform = `translate(${anchorX - def.origin.x * def.scale}, ${anchorY - def.origin.y * def.scale})`;
-  element.setAttribute("transform", transform);
-  getCubeStrokeElement(element)?.setAttribute("transform", transform);
+  element.setAttribute(
+    "transform",
+    `translate(${anchorX - def.origin.x * def.scale}, ${anchorY - def.origin.y * def.scale})`,
+  );
   // Takhle leží krychle jen během tahu mimo kvádr. I tak jí souřadnice pro řazení
   // dopočítáme z pozice na plátně, aby si nenesla ty z posledního přichycení.
   const equivalent = screenToSubGridAtLevel(anchorX, anchorY, 0);
@@ -627,9 +577,7 @@ function setCubeGridPosition(element, sx, sy, sz) {
   element.dataset.sy = String(sy);
   element.dataset.sz = String(sz);
   element.dataset.snapped = "1";
-  const transform = cubeTransformForGrid(element.dataset.type, sx, sy, sz);
-  element.setAttribute("transform", transform);
-  getCubeStrokeElement(element)?.setAttribute("transform", transform);
+  element.setAttribute("transform", cubeTransformForGrid(element.dataset.type, sx, sy, sz));
 }
 
 function createPlacedCubeHitArea(type) {
@@ -651,42 +599,26 @@ function createPlacedCubeHitArea(type) {
 
 function createPlacedCube(type, sx, sy, sz) {
   const def = CUBE_TYPES[type];
+  const group = document.createElementNS(SVG_NS, "g");
   const id = String(++cubeCounter);
-  const scale = `scale(${def.scale})`;
+  group.classList.add("placed-cube");
+  group.dataset.type = type;
+  group.dataset.id = id;
+  const visual = document.createElementNS(SVG_NS, "g");
+  visual.setAttribute("transform", `scale(${def.scale})`);
+  visual.appendChild(cloneCubeShape(type));
+  group.appendChild(visual);
+  group.appendChild(createPlacedCubeHitArea(type));
 
-  const fillGroup = document.createElementNS(SVG_NS, "g");
-  fillGroup.classList.add("placed-cube");
-  fillGroup.dataset.type = type;
-  fillGroup.dataset.id = id;
-  const fillVisual = document.createElementNS(SVG_NS, "g");
-  fillVisual.setAttribute("transform", scale);
-  fillVisual.appendChild(cloneCubeShape(type, "fill"));
-  fillGroup.appendChild(fillVisual);
-  fillGroup.appendChild(createPlacedCubeHitArea(type));
-
-  const strokeGroup = document.createElementNS(SVG_NS, "g");
-  strokeGroup.classList.add("placed-cube-stroke");
-  strokeGroup.dataset.type = type;
-  strokeGroup.dataset.id = id;
-  const strokeVisual = document.createElementNS(SVG_NS, "g");
-  strokeVisual.setAttribute("transform", scale);
-  strokeVisual.appendChild(cloneCubeShape(type, "stroke"));
-  strokeGroup.appendChild(strokeVisual);
-
-  placedCubeFills.appendChild(fillGroup);
-  placedCubeStrokes.appendChild(strokeGroup);
-  setCubeGridPosition(fillGroup, sx, sy, sz);
+  placedCubesLayer.appendChild(group);
+  setCubeGridPosition(group, sx, sy, sz);
   markOccupied(sx, sy, sz, def.subSize, id);
   sortPlacedCubes();
-  return fillGroup;
+  return group;
 }
 
 function bringToFront(element) {
-  placedCubeFills.appendChild(element);
-  const stroke = getCubeStrokeElement(element);
-  if (stroke) {
-    placedCubeStrokes.appendChild(stroke);
-  }
+  placedCubesLayer.appendChild(element);
 }
 
 function getStackVisual(targetElement) {
@@ -764,7 +696,7 @@ function startDragFromStack(type, clientX, clientY, targetElement) {
   setCubeScreenAnchor(cube, point.x - clickOffsetX, point.y - clickOffsetY);
   bringToFront(cube);
   cube.classList.add("is-dragging");
-  setCubeVisibility(cube, false);
+  cube.setAttribute("visibility", "hidden");
   placedCubesLayer.classList.add("is-dragging");
   diagram.classList.add("is-dragging");
 
@@ -837,7 +769,7 @@ function updateDrag(localX, localY) {
   setCubeScreenAnchor(dragState.element, anchorX, anchorY);
 
   if (dragState.fromStack) {
-    setCubeVisibility(dragState.element, false);
+    dragState.element.setAttribute("visibility", "hidden");
     if (dragState.ghost) {
       dragState.ghost.style.visibility = "visible";
     }
@@ -882,12 +814,12 @@ function endDrag(clientX, clientY) {
   // Krychle existuje jen v mřížce. Puštěná mimo kvádr nebo zpět do zásobníku mizí.
   if (dropOnStack || dropOutsideBoard || !cell) {
     clearOccupied(id);
-    removePlacedCube(element);
+    element.remove();
     sortPlacedCubes();
     return;
   }
 
-  setCubeVisibility(element, true);
+  element.removeAttribute("visibility");
   setCubeGridPosition(element, cell.sx, cell.sy, cell.sz);
   markOccupied(cell.sx, cell.sy, cell.sz, def.subSize, id);
   sortPlacedCubes();
@@ -1107,8 +1039,7 @@ function randomInt(min, max) {
 }
 
 function clearPlacedCubes() {
-  placedCubeFills.replaceChildren();
-  placedCubeStrokes.replaceChildren();
+  placedCubesLayer.replaceChildren();
   occupancy.clear();
 }
 
