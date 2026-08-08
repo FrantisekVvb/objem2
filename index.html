@@ -105,6 +105,167 @@
       display: none !important;
     }
 
+    .zoom-bar {
+      display: grid;
+      gap: 10px;
+    }
+
+    .zoom-controls {
+      display: grid;
+      grid-template-columns: 44px minmax(0, 1fr) 44px;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .canvas-pan-toggle {
+      box-sizing: border-box;
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      min-height: 44px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--panel-bg);
+      cursor: pointer;
+      font: inherit;
+      font-weight: 600;
+      font-size: 0.8rem;
+      line-height: 1.15;
+      color: var(--text);
+      -webkit-tap-highlight-color: transparent;
+      transition: background 0.15s, border-color 0.15s, transform 0.08s;
+    }
+
+    .canvas-pan-toggle:hover {
+      border-color: var(--accent);
+    }
+
+    .canvas-pan-toggle:active {
+      transform: translateY(1px);
+    }
+
+    .canvas-pan-toggle:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .canvas-pan-toggle.is-pressed {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #ffffff;
+    }
+
+    .canvas-pan-toggle.is-pressed:hover {
+      border-color: var(--accent-hover);
+      background: var(--accent-hover);
+    }
+
+    .canvas-pan-toggle__icon {
+      flex-shrink: 0;
+      width: 18px;
+      height: 18px;
+      display: block;
+    }
+
+    .canvas-pan-toggle__label {
+      min-width: 0;
+    }
+
+    .board-pan-catch {
+      position: absolute;
+      inset: 0;
+      z-index: 60;
+      cursor: grab;
+      touch-action: none;
+      background: transparent;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .board-pan-catch[hidden] {
+      display: none !important;
+    }
+
+    .board-pan-catch.is-dragging-pan {
+      cursor: grabbing;
+    }
+
+    .zoom-controls button {
+      appearance: none;
+      min-height: 44px;
+      min-width: 44px;
+      padding: 0;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--panel-bg);
+      cursor: pointer;
+      font: inherit;
+      font-weight: 600;
+      font-size: 1.1rem;
+      line-height: 1;
+      color: var(--text);
+      transition: background 0.15s, border-color 0.15s, transform 0.08s;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .zoom-controls button:hover {
+      border-color: var(--accent);
+    }
+
+    .zoom-controls button:active {
+      transform: translateY(1px);
+    }
+
+    .zoom-controls button:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .zoom-controls button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    #zoom-slider {
+      width: 100%;
+      height: 6px;
+      min-width: 0;
+      -webkit-appearance: none;
+      appearance: none;
+      border-radius: 999px;
+      background: var(--area-muted);
+      outline: none;
+    }
+
+    #zoom-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #ffffff;
+      border: 2px solid var(--accent);
+      cursor: pointer;
+    }
+
+    #zoom-slider::-moz-range-track {
+      height: 6px;
+      border-radius: 999px;
+      background: var(--area-muted);
+    }
+
+    #zoom-slider::-moz-range-thumb {
+      width: 18px;
+      height: 18px;
+      border: 2px solid var(--accent);
+      border-radius: 50%;
+      background: #ffffff;
+      cursor: pointer;
+    }
+
     .sr-only {
       position: absolute;
       width: 1px;
@@ -372,9 +533,24 @@
     }
 
     .indicator-answer-row {
-      display: block;
+      display: flex;
+      align-items: stretch;
+      gap: 8px;
       width: 100%;
       min-width: 0;
+    }
+
+    .indicator-answer-row .indicator-answer-field {
+      flex: 1 1 auto;
+    }
+
+    .indicator-answer-row #verify-btn {
+      width: auto;
+      flex: 0 0 auto;
+      align-self: stretch;
+      padding-left: 16px;
+      padding-right: 16px;
+      white-space: nowrap;
     }
 
     .indicator-answer-field {
@@ -640,21 +816,6 @@
       justify-content: center;
     }
 
-    /* Volná plocha je větší než kvádr, ale krychle mají stejné měřítko – umožníme posun. */
-    [data-app-mode="free"] .board-stage {
-      overflow: auto;
-      -webkit-overflow-scrolling: touch;
-    }
-
-    [data-app-mode="free"] .stage,
-    [data-app-mode="free"] #diagram-wrap {
-      width: max-content;
-      height: max-content;
-      min-width: 100%;
-      min-height: 100%;
-      flex: 0 0 auto;
-    }
-
     .stage {
       display: flex;
       align-items: center;
@@ -676,6 +837,21 @@
       justify-content: center;
       align-items: center;
       overflow: visible;
+      transform: translate(var(--board-pan-x, 0px), var(--board-pan-y, 0px))
+        scale(var(--board-zoom, 1));
+      transform-origin: center center;
+      will-change: transform;
+    }
+
+    /* Ve volné ploše držíme stejné měřítko krychlí jako v módu kvádr – wrap se nesmí smrštit. */
+    [data-app-mode="free"] #diagram-wrap {
+      flex: 0 0 auto;
+      min-width: auto;
+      min-height: auto;
+    }
+
+    [data-app-mode="free"] #diagram {
+      flex-shrink: 0;
     }
 
     #diagram {
@@ -690,12 +866,107 @@
       cursor: grabbing;
     }
 
-    .stack-cube {
+    #cube-stack {
+      flex: 1 1 auto;
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      padding: 12px 18px 20px;
+      min-height: 0;
+      overflow: auto;
+      -webkit-overflow-scrolling: touch;
+      border-top: 1px solid var(--border);
+    }
+
+    #cube-stack .stack-small-group {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 28px;
+      flex-shrink: 0;
+    }
+
+    #cube-stack .stack-cube {
+      position: relative;
+      touch-action: none;
+      user-select: none;
+      flex-shrink: 0;
       cursor: grab;
     }
 
-    .stack-cube:active {
+    #cube-stack .stack-cube:active {
       cursor: grabbing;
+    }
+
+    #cube-stack .stack-cube[data-type="cm3"] {
+      width: calc(var(--stack-cm3-w, 72px) + 16px);
+      height: calc(var(--stack-cm3-h, 72px) + 16px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #cube-stack .stack-cube[data-type="mm3"] {
+      width: var(--stack-mm3-hit, 44px);
+      height: var(--stack-mm3-hit, 44px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .stack-visual {
+      display: block;
+      overflow: visible;
+      pointer-events: none;
+    }
+
+    .stack-visual-cm3 {
+      width: var(--stack-cm3-w, 72px);
+      height: var(--stack-cm3-h, 72px);
+    }
+
+    .stack-visual-mm3 {
+      width: var(--stack-mm3-w, 10px);
+      height: var(--stack-mm3-h, 10px);
+    }
+
+    .stack-label {
+      position: absolute;
+      left: 50%;
+      bottom: calc(100% + 4px);
+      transform: translateX(-50%);
+      font-size: 0.78rem;
+      font-weight: 650;
+      white-space: nowrap;
+      pointer-events: none;
+      line-height: 1;
+    }
+
+    .stack-label-cm3 {
+      color: #003cff;
+    }
+
+    .stack-label-mm3 {
+      color: #880d0d;
+    }
+
+    .drag-ghost {
+      position: fixed;
+      box-sizing: border-box;
+      pointer-events: none;
+      z-index: 400;
+      margin: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .drag-ghost .stack-visual {
+      width: 100%;
+      height: 100%;
     }
 
     #static-layer,
@@ -717,7 +988,6 @@
       cursor: grabbing;
     }
 
-    .stack-hit,
     .cube-hit {
       fill: transparent;
       stroke: none;
@@ -899,23 +1169,88 @@
                   <option value="mm3">mm³</option>
                 </select>
               </div>
+              <button id="verify-btn" class="action-btn action-btn--primary" type="button">Ověřit</button>
             </div>
-            <button id="verify-btn" class="action-btn action-btn--primary" type="button">Ověřit</button>
             <p class="indicator-answer-feedback" id="volume-feedback" aria-live="polite"></p>
           </div>
         </div>
       </div>
 
       <div class="control-panel" id="free-panel" hidden>
-        <div class="panel-section">
-          <span class="panel-label">Volná plocha</span>
-          <p class="panel-text">Přetahuj krychle z zásobníku a skládej je libovolně na ploše.</p>
+        <div class="zoom-bar" role="toolbar" aria-label="Přiblížení plochy">
+          <span class="panel-label" id="zoom-heading">Přiblížení</span>
+          <span id="zoom-slider-label" class="sr-only">Měřítko plochy v procentech</span>
+          <div class="zoom-controls">
+            <button type="button" id="zoom-out-btn" aria-label="Oddálit">−</button>
+            <input
+              type="range"
+              id="zoom-slider"
+              min="100"
+              max="300"
+              step="10"
+              value="100"
+              aria-labelledby="zoom-heading zoom-slider-label"
+            />
+            <button type="button" id="zoom-in-btn" aria-label="Přiblížit">+</button>
+          </div>
+          <button
+            type="button"
+            id="canvas-pan-toggle"
+            class="canvas-pan-toggle"
+            aria-pressed="false"
+            aria-label="Pohybovat s plátnem — zapíná režim přetahování celého plátna"
+          >
+            <svg
+              class="canvas-pan-toggle__icon"
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+              aria-hidden="true"
+            >
+              <path
+                d="M18 11V6a2 2 0 00-2-2 2 2 0 00-2 2M14 10V4a2 2 0 00-2-2 2 2 0 00-2 2v2M10 10.5V6a2 2 0 00-2-2 2 2 0 00-2 2v8a8 8 0 008 8h2c2.8 0 4.5-.86 5.99-2.34l1.41-1.41a2 2 0 00-2.83-2.82L15 15"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <span class="canvas-pan-toggle__label">Pohybovat s plátnem</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="cube-stack" aria-label="Zásobník krychlí">
+        <div class="stack-cube" data-type="cm3" role="button" tabindex="0" aria-label="1 cm³">
+          <svg class="stack-visual stack-visual-cm3" viewBox="20.5 21 40.3 40" aria-hidden="true">
+            <path d="M50.3127 61H20.5L20.6498 31.1873L30.8371 21H60.7996V50.6629L50.3127 61Z" fill="#C8D4FA"/>
+            <path d="M20.6498 31.1873L30.8371 21H60.7996V50.6629L50.3127 61H20.5L20.6498 31.1873ZM50.3127 61V31.1873M60.7996 21L50.3127 31.1873M20.6498 31.1873H50.3127" stroke="#003CFF" fill="none"/>
+          </svg>
+          <span class="stack-label stack-label-cm3">1 cm³</span>
+        </div>
+        <div class="stack-small-group">
+          <div class="stack-cube" data-type="mm3" role="button" tabindex="0" aria-label="1 mm³">
+            <svg class="stack-visual stack-visual-mm3" viewBox="123.5 46 4.03 4" aria-hidden="true">
+              <path d="M126.481 50H123.5L123.515 47.0187L124.534 46H127.53V48.9663L126.481 50Z" fill="#FF9F9F"/>
+              <path d="M123.515 47.0187L124.534 46H127.53V48.9663L126.481 50H123.5L123.515 47.0187ZM126.481 50V47.0187M127.53 46L126.481 47.0187M123.515 47.0187H126.481" stroke="#880D0D" stroke-width="0.1" fill="none"/>
+            </svg>
+            <span class="stack-label stack-label-mm3">1 mm³</span>
+          </div>
         </div>
       </div>
     </aside>
 
     <div class="workspace">
       <div class="board-stage" aria-label="Pracovní plocha">
+        <div
+          id="board-pan-catch"
+          class="board-pan-catch"
+          hidden
+          aria-hidden="true"
+          aria-label="Přetahování plátna"
+        ></div>
         <div class="stage" id="stage">
           <div id="diagram-wrap">
                 <svg id="diagram" width="178" height="242" viewBox="0 0 178 242" fill="none" xmlns="http://www.w3.org/2000/svg" overflow="visible" aria-label="Objem">
@@ -924,11 +1259,23 @@
                     <defs>
                       <g id="cm-cube-shape">
                         <path d="M50.3127 61H20.5L20.6498 31.1873L30.8371 21H60.7996V50.6629L50.3127 61Z" fill="#C8D4FA"/>
-                        <path d="M20.6498 31.1873L30.8371 21H60.7996V50.6629L50.3127 61H20.5L20.6498 31.1873ZM50.3127 61V31.1873M60.7996 21L50.3127 31.1873M20.6498 31.1873H50.3127" stroke="#003CFF"/>
+                        <path d="M20.6498 31.1873L30.8371 21H60.7996V50.6629L50.3127 61H20.5L20.6498 31.1873ZM50.3127 61V31.1873M60.7996 21L50.3127 31.1873M20.6498 31.1873H50.3127" stroke="#003CFF" fill="none"/>
+                      </g>
+                      <g id="cm-cube-fill">
+                        <path d="M50.3127 61H20.5L20.6498 31.1873L30.8371 21H60.7996V50.6629L50.3127 61Z" fill="#C8D4FA"/>
+                      </g>
+                      <g id="cm-cube-stroke">
+                        <path d="M20.6498 31.1873L30.8371 21H60.7996V50.6629L50.3127 61H20.5L20.6498 31.1873ZM50.3127 61V31.1873M60.7996 21L50.3127 31.1873M20.6498 31.1873H50.3127" stroke="#003CFF" fill="none"/>
                       </g>
                       <g id="mm-cube-shape">
                         <path d="M126.481 50H123.5L123.515 47.0187L124.534 46H127.53V48.9663L126.481 50Z" fill="#FF9F9F"/>
-                        <path d="M123.515 47.0187L124.534 46H127.53V48.9663L126.481 50H123.5L123.515 47.0187ZM126.481 50V47.0187M127.53 46L126.481 47.0187M123.515 47.0187H126.481" stroke="#880D0D" stroke-width="0.1"/>
+                        <path d="M123.515 47.0187L124.534 46H127.53V48.9663L126.481 50H123.5L123.515 47.0187ZM126.481 50V47.0187M127.53 46L126.481 47.0187M123.515 47.0187H126.481" stroke="#880D0D" stroke-width="0.1" fill="none"/>
+                      </g>
+                      <g id="mm-cube-fill">
+                        <path d="M126.481 50H123.5L123.515 47.0187L124.534 46H127.53V48.9663L126.481 50Z" fill="#FF9F9F"/>
+                      </g>
+                      <g id="mm-cube-stroke">
+                        <path d="M123.515 47.0187L124.534 46H127.53V48.9663L126.481 50H123.5L123.515 47.0187ZM126.481 50V47.0187M127.53 46L126.481 47.0187M123.515 47.0187H126.481" stroke="#880D0D" stroke-width="0.1" fill="none"/>
                       </g>
                     </defs>
 
@@ -939,20 +1286,10 @@
                       </g>
                     </g>
 
-                    <g id="cube-stack" aria-label="Zásobník krychlí">
-                      <g class="stack-cube" data-type="cm3">
-                        <use href="#cm-cube-shape" transform="translate(0 -5)"/>
-                        <path d="M31.08 3.55V10H30.19V4.35H28.46L28.68 3.55H31.08ZM39.0356 5.02C39.7456 5.02 40.3256 5.28 40.7756 5.79L40.2456 6.37C39.9656 5.99 39.5656 5.8 39.0356 5.8C38.5456 5.8 38.1456 5.97 37.8356 6.3C37.5256 6.63 37.3656 7.04 37.3656 7.55C37.3656 8.06 37.5256 8.49 37.8356 8.83C38.1556 9.16 38.5556 9.33 39.0456 9.33C39.5356 9.33 39.9356 9.15 40.2356 8.79L40.7956 9.33C40.3356 9.86 39.7556 10.12 39.0456 10.12C38.2856 10.12 37.6656 9.87 37.1856 9.38C36.7156 8.89 36.4756 8.28 36.4756 7.56C36.4756 6.84 36.7056 6.24 37.1756 5.75C37.6456 5.26 38.2656 5.02 39.0356 5.02ZM47.5763 5.02C48.7663 5.02 49.5163 5.63 49.5163 6.74V10H48.6363V6.98C48.6363 6.19 48.1063 5.8 47.4163 5.8C47.0663 5.8 46.7663 5.91 46.5163 6.13C46.2663 6.35 46.1363 6.63 46.1363 6.96V10H45.2563V6.98C45.2563 6.19 44.7263 5.8 44.0363 5.8C43.6863 5.8 43.3863 5.91 43.1263 6.13C42.8763 6.35 42.7463 6.63 42.7463 6.96V10H41.8663V5.12H42.7063V5.21V5.69C43.0763 5.24 43.5963 5.02 44.2563 5.02C45.0363 5.02 45.5863 5.31 45.8963 5.88C46.1663 5.43 46.7863 5.02 47.5763 5.02ZM52.0327 1.81C52.7627 1.81 53.3227 2.26 53.3227 2.86C53.3227 3.27 53.1327 3.56 52.7627 3.73C53.1627 3.86 53.4227 4.24 53.4227 4.67C53.4227 5 53.2927 5.29 53.0227 5.52C52.7627 5.75 52.4427 5.86 52.0527 5.86C51.3827 5.86 50.9227 5.57 50.6927 4.99L51.2927 4.68C51.4027 5.04 51.6427 5.22 52.0127 5.22C52.4127 5.22 52.6827 5 52.6827 4.64C52.6827 4.31 52.3927 4.06 52.0727 4.05H51.8527V3.46C51.9627 3.46 52.0427 3.46 52.0927 3.45C52.3827 3.44 52.6327 3.23 52.6327 2.92C52.6327 2.63 52.3827 2.42 52.0327 2.42C51.6827 2.42 51.4527 2.6 51.3327 2.95L50.7627 2.65C50.9227 2.17 51.3927 1.81 52.0327 1.81Z" fill="black"/>
-                        <rect class="stack-hit" x="18" y="13" width="46" height="46"/>
-                      </g>
-                      <g class="stack-cube" data-type="mm3">
-                        <use href="#mm-cube-shape"/>
-                        <path d="M112.08 29.55V36H111.19V30.35H109.46L109.68 29.55H112.08ZM123.606 31.02C124.796 31.02 125.546 31.63 125.546 32.74V36H124.666V32.98C124.666 32.19 124.136 31.8 123.446 31.8C123.096 31.8 122.796 31.91 122.546 32.13C122.296 32.35 122.166 32.63 122.166 32.96V36H121.286V32.98C121.286 32.19 120.756 31.8 120.066 31.8C119.716 31.8 119.416 31.91 119.156 32.13C118.906 32.35 118.776 32.63 118.776 32.96V36H117.896V31.12H118.736V31.21V31.69C119.106 31.24 119.626 31.02 120.286 31.02C121.066 31.02 121.616 31.31 121.926 31.88C122.196 31.43 122.816 31.02 123.606 31.02ZM132.922 31.02C134.112 31.02 134.862 31.63 134.862 32.74V36H133.982V32.98C133.982 32.19 133.452 31.8 132.762 31.8C132.412 31.8 132.112 31.91 131.862 32.13C131.612 32.35 131.482 32.63 131.482 32.96V36H130.602V32.98C130.602 32.19 130.072 31.8 129.382 31.8C129.032 31.8 128.732 31.91 128.472 32.13C128.222 32.35 128.092 32.63 128.092 32.96V36H127.212V31.12H128.052V31.21V31.69C128.422 31.24 128.942 31.02 129.602 31.02C130.382 31.02 130.932 31.31 131.242 31.88C131.512 31.43 132.132 31.02 132.922 31.02ZM137.378 27.81C138.108 27.81 138.668 28.26 138.668 28.86C138.668 29.27 138.478 29.56 138.108 29.73C138.508 29.86 138.768 30.24 138.768 30.67C138.768 31 138.638 31.29 138.368 31.52C138.108 31.75 137.788 31.86 137.398 31.86C136.728 31.86 136.268 31.57 136.038 30.99L136.638 30.68C136.748 31.04 136.988 31.22 137.358 31.22C137.758 31.22 138.028 31 138.028 30.64C138.028 30.31 137.738 30.06 137.418 30.05H137.198V29.46C137.308 29.46 137.388 29.46 137.438 29.45C137.728 29.44 137.978 29.23 137.978 28.92C137.978 28.63 137.728 28.42 137.378 28.42C137.028 28.42 136.798 28.6 136.678 28.95L136.108 28.65C136.268 28.17 136.738 27.81 137.378 27.81Z" fill="black"/>
-                        <rect class="stack-hit" x="118" y="42" width="14" height="14"/>
-                      </g>
+                    <g id="placed-cubes">
+                      <g id="placed-cube-fills"></g>
+                      <g id="placed-cube-strokes" pointer-events="none"></g>
                     </g>
-
-                    <g id="placed-cubes"></g>
 
                     <g id="label-layer">
                       <g id="cuboid-front-overlay"></g>
@@ -1018,6 +1355,6 @@
     </div>
   </div>
 
-  <script src="main.js?v=12"></script>
+  <script src="main.js?v=25"></script>
 </body>
 </html>

@@ -17,13 +17,9 @@ const MM_CUBE_ORIGIN = { x: 123.5, y: 50 };
 const CUBOID_MIN_DM = 1;
 const CUBOID_MAX_DM = 4;
 const CUBOID_SEARCH_MAX_DM = 16;
-const STACK_CONTENT_BOUNDS = { minX: 8, minY: 0, maxX: 172, maxY: 72 };
 const CONTENT_LABEL_PADDING = 22;
 const VIEWPORT_SAFETY = 0.92;
 const MIN_FIT_SCALE = 0.75;
-// Posun o (+1, −3, +1) krychle vyjde v této projekci na obrazovce jen o 1 px, takže na
-// jedno místo padá víc buněk mřížky. Kandidáty v tomto okruhu považujeme za shodné.
-const SNAP_TIE_TOLERANCE = 3;
 const CONFETTI_COLORS = [
   "#059669",
   "#10b981",
@@ -48,6 +44,9 @@ const WIREFRAME_UNIT = CUBE_PROJ_WIDTH;
 const WIREFRAME_DEPTH_STEP = CUBE_PROJ_DEPTH;
 const WIREFRAME_HEIGHT_STEP = CUBE_PROJ_HEIGHT;
 const FREE_SURFACE_CUBOID = { widthDm: 10, depthDm: 6, heightDm: 4 };
+const FREE_ZOOM_MIN = 1;
+const FREE_ZOOM_MAX = 3;
+const FREE_ZOOM_STEP = 0.1;
 
 const CUBE_TYPES = {
   cm3: {
@@ -55,6 +54,8 @@ const CUBE_TYPES = {
     scale: CUBE_SCALE_TO_WIREFRAME,
     origin: CM_CUBE_ORIGIN,
     templateId: "cm-cube-shape",
+    fillTemplateId: "cm-cube-fill",
+    strokeTemplateId: "cm-cube-stroke",
     stackCenter: { x: 40.65, y: 41 },
     hit: { x: 18, y: 18, w: 46, h: 46 },
   },
@@ -63,6 +64,8 @@ const CUBE_TYPES = {
     scale: CUBE_SCALE_TO_WIREFRAME,
     origin: MM_CUBE_ORIGIN,
     templateId: "mm-cube-shape",
+    fillTemplateId: "mm-cube-fill",
+    strokeTemplateId: "mm-cube-stroke",
     stackCenter: { x: 125.5, y: 48 },
     hit: { x: 118, y: 42, w: 14, h: 14 },
   },
@@ -80,6 +83,11 @@ const modeFreeBtn = document.getElementById("mode-free-btn");
 const cuboidPanel = document.getElementById("cuboid-panel");
 const freePanel = document.getElementById("free-panel");
 const newCuboidBtn = document.getElementById("new-cuboid-btn");
+const zoomSlider = document.getElementById("zoom-slider");
+const zoomOutBtn = document.getElementById("zoom-out-btn");
+const zoomInBtn = document.getElementById("zoom-in-btn");
+const canvasPanToggle = document.getElementById("canvas-pan-toggle");
+const boardPanCatch = document.getElementById("board-pan-catch");
 const cuboidWidthInput = document.getElementById("cuboid-width");
 const cuboidDepthInput = document.getElementById("cuboid-depth");
 const cuboidHeightInput = document.getElementById("cuboid-height");
@@ -96,6 +104,8 @@ const volumeKeypadCancel = document.getElementById("volume-keypad-cancel");
 const volumeMathKeypad = document.getElementById("volume-math-keypad");
 const content = document.getElementById("content");
 const placedCubesLayer = document.getElementById("placed-cubes");
+const placedCubeFills = document.getElementById("placed-cube-fills");
+const placedCubeStrokes = document.getElementById("placed-cube-strokes");
 const cubeStack = document.getElementById("cube-stack");
 const cuboidExact = document.getElementById("cuboid-exact");
 const cuboidExactLabels = document.getElementById("cuboid-exact-labels");
@@ -109,6 +119,10 @@ const staticLayer = document.getElementById("static-layer");
 let dragState = null;
 let cubeCounter = 0;
 let isFreeSurfaceMode = false;
+let freeZoom = FREE_ZOOM_MIN;
+let freePan = { x: 0, y: 0 };
+let isPanMode = false;
+let panDrag = null;
 let celebrationTimer = null;
 let volumeKeypadDraft = "";
 let isVolumeKeypadOpen = false;
@@ -119,10 +133,15 @@ function occupancyKey(sx, sy, sz) {
 }
 
 function getLocalPoint(clientX, clientY) {
+  const ctm = content.getScreenCTM();
+  if (!ctm) {
+    return { x: 0, y: 0 };
+  }
+
   const point = diagram.createSVGPoint();
   point.x = clientX;
   point.y = clientY;
-  return point.matrixTransform(content.getScreenCTM().inverse());
+  return point.matrixTransform(ctm.inverse());
 }
 
 function parseTranslate(element) {
@@ -233,48 +252,38 @@ function hasSupportBelow(sx, sy, sz, subSize, excludeId) {
   return false;
 }
 
-// Vrátí buňku mřížky, do které krychle patří. Prochází patra, v každém dopočítá přesné
-// sx/sy a okolí prověří jen kvůli obsazenosti.
+// Vrátí buňku mřížky, do které krychle patří.
+//
+// Pod kurzorem neleží jedna buňka, ale celý paprsek buněk nad sebou, které se promítnou
+// na stejné místo. Paprsek sestavíme tak, že v každém patře dopočítáme přesné sx/sy –
+// to je právě ta buňka, kterou kurzor v daném patře protíná. Sousední buňky do paprsku
+// nepatří: u mm³ je od sebe dělí jen 1,4 px, takže by se do výběru vešly taky a krychle
+// by pak sedala vedle.
 function findNearestCell(anchorX, anchorY, subSize, excludeId) {
   const bounds = getCuboidSubSize();
-  const candidates = [];
-  let best = null;
-
-  const consider = (sx, sy, sz) => {
-    if (!canPlaceAt(sx, sy, sz, subSize, excludeId)) {
-      return;
-    }
-    const screen = subGridToScreen(sx, sy, sz);
-    const distance = Math.hypot(screen.x - anchorX, screen.y - anchorY);
-    const candidate = { sx, sy, sz, distance, screen };
-    if (!best || distance < best.distance) {
-      best = candidate;
-    }
-    candidates.push(candidate);
-  };
+  const ray = [];
 
   for (let sz = 0; sz <= bounds.height - subSize; sz += subSize) {
     const exact = screenToSubGridAtLevel(anchorX, anchorY, sz);
-    const baseX = Math.round(exact.sx / subSize) * subSize;
-    const baseY = Math.round(exact.sy / subSize) * subSize;
-    for (let dy = -1; dy <= 1; dy += 1) {
-      for (let dx = -1; dx <= 1; dx += 1) {
-        consider(baseX + dx * subSize, baseY + dy * subSize, sz);
-      }
+    const sx = Math.round(exact.sx / subSize) * subSize;
+    const sy = Math.round(exact.sy / subSize) * subSize;
+    if (!canPlaceAt(sx, sy, sz, subSize, excludeId)) {
+      continue;
     }
+    const screen = subGridToScreen(sx, sy, sz);
+    ray.push({
+      sx,
+      sy,
+      sz,
+      screen,
+      distance: Math.hypot(screen.x - anchorX, screen.y - anchorY),
+    });
   }
 
-  if (!best) {
+  if (!ray.length) {
     return null;
   }
 
-  // Buňky, které padnou prakticky na stejný pixel jako vítěz, leží na paprsku pod
-  // kurzorem – z obrázku se mezi nimi vybrat nedá. Sousedy v řadě dělí 14 px, ty se sem
-  // tedy nedostanou.
-  const ray = candidates.filter(
-    (cell) =>
-      Math.hypot(cell.screen.x - best.screen.x, cell.screen.y - best.screen.y) <= SNAP_TIE_TOLERANCE,
-  );
   // Vybíráme jako při stavění: krychle putuje po paprsku od diváka dozadu a zastaví se
   // na první ploše, na kterou má dosednout. Když cestou žádnou nepotká, opře se úplně
   // vzadu o stěnu kvádru. Rozhoduje jen poloha kurzoru, ne trasa, kudy se krychle vedla.
@@ -284,6 +293,33 @@ function findNearestCell(anchorX, anchorY, subSize, excludeId) {
   );
 
   return landing || ray[ray.length - 1];
+}
+
+// Když paprsek pod kurzorem mine kvádr (typicky malý kvádr / okraj boxu), najdi nejbližší
+// volnou buňku podle vzdálenosti na obrazovce – ať jde ze zásobníku položit do celého boxu.
+function findClosestPlaceableCell(anchorX, anchorY, subSize, excludeId) {
+  const bounds = getCuboidSubSize();
+  let best = null;
+
+  for (let sz = 0; sz <= bounds.height - subSize; sz += subSize) {
+    for (let sy = 0; sy <= bounds.depth - subSize; sy += subSize) {
+      for (let sx = 0; sx <= bounds.width - subSize; sx += subSize) {
+        if (!canPlaceAt(sx, sy, sz, subSize, excludeId)) {
+          continue;
+        }
+        if (!hasSupportBelow(sx, sy, sz, subSize, excludeId)) {
+          continue;
+        }
+        const screen = subGridToScreen(sx, sy, sz);
+        const distance = Math.hypot(screen.x - anchorX, screen.y - anchorY);
+        if (!best || distance < best.distance) {
+          best = { sx, sy, sz, screen, distance };
+        }
+      }
+    }
+  }
+
+  return best;
 }
 
 function getCuboidScreenBoundsForSize(widthDm, depthDm, heightDm) {
@@ -326,12 +362,11 @@ function getCuboidScreenBounds() {
 
 function getContentBoundsForCuboidSize(widthDm, depthDm, heightDm) {
   const cuboid = getCuboidScreenBoundsForSize(widthDm, depthDm, heightDm);
-  const stack = isFreeSurfaceMode ? getStackBounds() : STACK_CONTENT_BOUNDS;
   return {
-    minX: Math.min(stack.minX, cuboid.minX - CONTENT_LABEL_PADDING),
-    minY: Math.min(stack.minY, cuboid.minY - CONTENT_LABEL_PADDING),
-    maxX: Math.max(stack.maxX, cuboid.maxX + CONTENT_LABEL_PADDING),
-    maxY: Math.max(stack.maxY, cuboid.maxY + CONTENT_LABEL_PADDING),
+    minX: cuboid.minX - CONTENT_LABEL_PADDING,
+    minY: cuboid.minY - CONTENT_LABEL_PADDING,
+    maxX: cuboid.maxX + CONTENT_LABEL_PADDING,
+    maxY: cuboid.maxY + CONTENT_LABEL_PADDING,
   };
 }
 
@@ -397,19 +432,20 @@ function isCubeBehind(a, b) {
   return a.sx + a.s <= b.sx || a.sy >= b.sy + b.s || a.sz + a.s <= b.sz;
 }
 
-function sortPlacedCubes() {
-  const items = [...placedCubesLayer.querySelectorAll(".placed-cube")].map((element) => ({
-    element,
-    box: getCubePaintBox(element),
-  }));
+// Výplně: mm³ zůstává vidět na ploše cm³. Hrany řadíme zvlášť geometricky.
+function isCubeBehindForFill(a, b) {
+  if (a.s !== b.s) {
+    return a.s > b.s;
+  }
+  return isCubeBehind(a, b);
+}
 
-  // Hrubé předřazení podle vzdálenosti ve směru pohledu drží výsledek stabilní.
+function orderPaintItems(items, behindFn) {
   const xRatio = WIREFRAME_DEPTH_STEP / WIREFRAME_UNIT;
   const zRatio = WIREFRAME_DEPTH_STEP / WIREFRAME_HEIGHT_STEP;
   const farness = (box) => box.sy - xRatio * box.sx - zRatio * box.sz;
   items.sort((p, q) => farness(q.box) - farness(p.box) || p.box.sx - q.box.sx);
 
-  // Malířův algoritmus: krychli vykreslíme až po všech, které jsou za ní a překrývají ji.
   const state = new Array(items.length).fill(0);
   const ordered = [];
   const visit = (i) => {
@@ -421,7 +457,7 @@ function sortPlacedCubes() {
       if (j === i || state[j] || !paintBoxesOverlap(items[i].box, items[j].box)) {
         continue;
       }
-      if (isCubeBehind(items[j].box, items[i].box)) {
+      if (behindFn(items[j].box, items[i].box)) {
         visit(j);
       }
     }
@@ -431,8 +467,50 @@ function sortPlacedCubes() {
   for (let i = 0; i < items.length; i += 1) {
     visit(i);
   }
+  return ordered;
+}
 
-  placedCubesLayer.replaceChildren(...ordered);
+function getCubeStrokeElement(fillElement) {
+  if (!fillElement) {
+    return null;
+  }
+  return placedCubeStrokes.querySelector(`.placed-cube-stroke[data-id="${fillElement.dataset.id}"]`);
+}
+
+function setCubeVisibility(fillElement, visible) {
+  if (visible) {
+    fillElement.removeAttribute("visibility");
+    getCubeStrokeElement(fillElement)?.removeAttribute("visibility");
+  } else {
+    fillElement.setAttribute("visibility", "hidden");
+    getCubeStrokeElement(fillElement)?.setAttribute("visibility", "hidden");
+  }
+}
+
+function removePlacedCube(fillElement) {
+  getCubeStrokeElement(fillElement)?.remove();
+  fillElement.remove();
+}
+
+function sortPlacedCubes() {
+  const fills = [...placedCubeFills.querySelectorAll(".placed-cube")].map((element) => ({
+    element,
+    box: getCubePaintBox(element),
+  }));
+  const fillOrder = orderPaintItems(fills, isCubeBehindForFill);
+  placedCubeFills.replaceChildren(...fillOrder);
+
+  const strokes = fillOrder.map((fill) => {
+    const stroke = getCubeStrokeElement(fill);
+    return stroke
+      ? {
+          element: stroke,
+          box: getCubePaintBox(fill),
+        }
+      : null;
+  }).filter(Boolean);
+  const strokeOrder = orderPaintItems(strokes, isCubeBehind);
+  placedCubeStrokes.replaceChildren(...strokeOrder);
 }
 
 function getCubeProjectionSize(cells) {
@@ -476,8 +554,13 @@ function pickTopmostCubeAt(localX, localY) {
     return null;
   }
 
-  // Vyber "nejvíc navrchu" podle skutečné obrazovky, ne podle zastaralých grid souřadnic.
+  // Vyber "nejvíc navrchu". 1 mm³ má přednost před 1 cm³, jinak podle pozice na obrazovce.
   candidates.sort((a, b) => {
+    const aSize = CUBE_TYPES[a.dataset.type].subSize;
+    const bSize = CUBE_TYPES[b.dataset.type].subSize;
+    if (aSize !== bSize) {
+      return bSize - aSize;
+    }
     const aAnchor = getCubeScreenAnchor(a);
     const bAnchor = getCubeScreenAnchor(b);
     if (aAnchor.y !== bAnchor.y) return aAnchor.y - bAnchor.y;
@@ -498,10 +581,16 @@ function pickPlacedCubeFromEvent(event) {
   return pickTopmostCubeAt(point.x, point.y);
 }
 
-function cloneCubeShape(type) {
+function cloneCubeShape(type, part = "shape") {
   const def = CUBE_TYPES[type];
+  const templateId =
+    part === "fill"
+      ? def.fillTemplateId
+      : part === "stroke"
+        ? def.strokeTemplateId
+        : def.templateId;
   const use = document.createElementNS(SVG_NS, "use");
-  use.setAttribute("href", `#${def.templateId}`);
+  use.setAttribute("href", `#${templateId}`);
   return use;
 }
 
@@ -516,10 +605,9 @@ function getCubeScreenAnchor(element) {
 
 function setCubeScreenAnchor(element, anchorX, anchorY) {
   const def = CUBE_TYPES[element.dataset.type];
-  element.setAttribute(
-    "transform",
-    `translate(${anchorX - def.origin.x * def.scale}, ${anchorY - def.origin.y * def.scale})`,
-  );
+  const transform = `translate(${anchorX - def.origin.x * def.scale}, ${anchorY - def.origin.y * def.scale})`;
+  element.setAttribute("transform", transform);
+  getCubeStrokeElement(element)?.setAttribute("transform", transform);
   // Takhle leží krychle jen během tahu mimo kvádr. I tak jí souřadnice pro řazení
   // dopočítáme z pozice na plátně, aby si nenesla ty z posledního přichycení.
   const equivalent = screenToSubGridAtLevel(anchorX, anchorY, 0);
@@ -539,7 +627,9 @@ function setCubeGridPosition(element, sx, sy, sz) {
   element.dataset.sy = String(sy);
   element.dataset.sz = String(sz);
   element.dataset.snapped = "1";
-  element.setAttribute("transform", cubeTransformForGrid(element.dataset.type, sx, sy, sz));
+  const transform = cubeTransformForGrid(element.dataset.type, sx, sy, sz);
+  element.setAttribute("transform", transform);
+  getCubeStrokeElement(element)?.setAttribute("transform", transform);
 }
 
 function createPlacedCubeHitArea(type) {
@@ -561,48 +651,131 @@ function createPlacedCubeHitArea(type) {
 
 function createPlacedCube(type, sx, sy, sz) {
   const def = CUBE_TYPES[type];
-  const group = document.createElementNS(SVG_NS, "g");
   const id = String(++cubeCounter);
-  group.classList.add("placed-cube");
-  group.dataset.type = type;
-  group.dataset.id = id;
-  const visual = document.createElementNS(SVG_NS, "g");
-  visual.setAttribute("transform", `scale(${def.scale})`);
-  visual.appendChild(cloneCubeShape(type));
-  group.appendChild(visual);
-  group.appendChild(createPlacedCubeHitArea(type));
+  const scale = `scale(${def.scale})`;
 
-  placedCubesLayer.appendChild(group);
-  setCubeGridPosition(group, sx, sy, sz);
+  const fillGroup = document.createElementNS(SVG_NS, "g");
+  fillGroup.classList.add("placed-cube");
+  fillGroup.dataset.type = type;
+  fillGroup.dataset.id = id;
+  const fillVisual = document.createElementNS(SVG_NS, "g");
+  fillVisual.setAttribute("transform", scale);
+  fillVisual.appendChild(cloneCubeShape(type, "fill"));
+  fillGroup.appendChild(fillVisual);
+  fillGroup.appendChild(createPlacedCubeHitArea(type));
+
+  const strokeGroup = document.createElementNS(SVG_NS, "g");
+  strokeGroup.classList.add("placed-cube-stroke");
+  strokeGroup.dataset.type = type;
+  strokeGroup.dataset.id = id;
+  const strokeVisual = document.createElementNS(SVG_NS, "g");
+  strokeVisual.setAttribute("transform", scale);
+  strokeVisual.appendChild(cloneCubeShape(type, "stroke"));
+  strokeGroup.appendChild(strokeVisual);
+
+  placedCubeFills.appendChild(fillGroup);
+  placedCubeStrokes.appendChild(strokeGroup);
+  setCubeGridPosition(fillGroup, sx, sy, sz);
   markOccupied(sx, sy, sz, def.subSize, id);
   sortPlacedCubes();
-  return group;
+  return fillGroup;
 }
 
 function bringToFront(element) {
-  placedCubesLayer.appendChild(element);
+  placedCubeFills.appendChild(element);
+  const stroke = getCubeStrokeElement(element);
+  if (stroke) {
+    placedCubeStrokes.appendChild(stroke);
+  }
 }
 
-function getStackTransformOffset() {
-  return parseTranslate(cubeStack);
+function getStackVisual(targetElement) {
+  return targetElement.querySelector(".stack-visual") || targetElement;
 }
 
-function startDragFromStack(type, localX, localY) {
+function createDragGhost(type, rect, sourceVisual) {
+  const ghost = document.createElement("div");
+  ghost.className = `drag-ghost drag-ghost--${type}`;
+  ghost.setAttribute("aria-hidden", "true");
+  ghost.style.width = `${rect.width}px`;
+  ghost.style.height = `${rect.height}px`;
+  ghost.style.left = `${rect.left}px`;
+  ghost.style.top = `${rect.top}px`;
+  if (sourceVisual) {
+    ghost.appendChild(sourceVisual.cloneNode(true));
+  }
+  document.body.append(ghost);
+  return ghost;
+}
+
+function clearDragGhost() {
+  if (dragState?.ghost) {
+    dragState.ghost.remove();
+    dragState.ghost = null;
+  }
+}
+
+function updateDragGhost(clientX, clientY) {
+  if (!dragState?.ghost) {
+    return;
+  }
+  dragState.ghost.style.left = `${clientX - dragState.screenOffsetX}px`;
+  dragState.ghost.style.top = `${clientY - dragState.screenOffsetY}px`;
+}
+
+function isPointerInStack(clientX, clientY) {
+  const stackRect = cubeStack.getBoundingClientRect();
+  return (
+    clientX >= stackRect.left &&
+    clientX <= stackRect.right &&
+    clientY >= stackRect.top &&
+    clientY <= stackRect.bottom
+  );
+}
+
+function isPointerInBoard(clientX, clientY) {
+  const board = document.querySelector(".board-stage") || diagram;
+  const rect = board.getBoundingClientRect();
+  return (
+    clientX >= rect.left &&
+    clientX <= rect.right &&
+    clientY >= rect.top &&
+    clientY <= rect.bottom
+  );
+}
+
+function startDragFromStack(type, clientX, clientY, targetElement) {
   const def = CUBE_TYPES[type];
+  const visual = getStackVisual(targetElement);
+  const rect = visual.getBoundingClientRect();
+  const screenOffsetX = clientX - rect.left;
+  const screenOffsetY = clientY - rect.top;
+  const cells = def.subSize / SUB;
+  // Zásobník ukazuje celý průmět (včetně hloubky); kotva je vlevo dole.
+  const { w, h, d } = getCubeProjectionSize(cells);
+  const silW = w + d;
+  const silH = h + d;
+  const clickOffsetX = (screenOffsetX / Math.max(rect.width, 1)) * silW;
+  const clickOffsetY = (screenOffsetY / Math.max(rect.height, 1)) * silH - silH;
+  const point = getLocalPoint(clientX, clientY);
+
   const cube = createPlacedCube(type, 0, 0, 0);
   clearOccupied(cube.dataset.id);
-  const stackOffset = getStackTransformOffset();
-  const stackX = def.origin.x * def.scale + stackOffset.x;
-  const stackY = (def.origin.y + (type === "cm3" ? -5 : 0)) * def.scale + stackOffset.y;
-  setCubeScreenAnchor(cube, stackX, stackY);
+  setCubeScreenAnchor(cube, point.x - clickOffsetX, point.y - clickOffsetY);
   bringToFront(cube);
+  cube.classList.add("is-dragging");
+  setCubeVisibility(cube, false);
   placedCubesLayer.classList.add("is-dragging");
   diagram.classList.add("is-dragging");
 
   dragState = {
     element: cube,
-    offsetX: localX - stackX,
-    offsetY: localY - stackY,
+    ghost: createDragGhost(type, rect, visual),
+    screenOffsetX,
+    screenOffsetY,
+    offsetX: clickOffsetX,
+    offsetY: clickOffsetY,
+    fromStack: true,
     pointerId: null,
   };
 }
@@ -617,10 +790,40 @@ function startDragPlacedCube(element, localX, localY) {
 
   dragState = {
     element,
+    ghost: null,
+    screenOffsetX: 0,
+    screenOffsetY: 0,
     offsetX: localX - anchor.x,
     offsetY: localY - anchor.y,
+    fromStack: false,
     pointerId: null,
   };
+}
+
+function resolveSnapCell(
+  anchorX,
+  anchorY,
+  cursorX,
+  cursorY,
+  subSize,
+  excludeId,
+  fromStack,
+  pointerInBoard,
+) {
+  if (fromStack) {
+    // Ze zásobníku nad pravým boxem položíme i když paprsek mine malý kvádr.
+    return (
+      findNearestCell(anchorX, anchorY, subSize, excludeId) ||
+      findNearestCell(cursorX, cursorY, subSize, excludeId) ||
+      (pointerInBoard ? findClosestPlaceableCell(cursorX, cursorY, subSize, excludeId) : null)
+    );
+  }
+
+  // U už položené krychle držíme přísnější hranici průmětu, ať jde odtáhnout pryč.
+  if (!shouldSnapToCuboid(anchorX, anchorY) && !shouldSnapToCuboid(cursorX, cursorY)) {
+    return null;
+  }
+  return findNearestCell(anchorX, anchorY, subSize, excludeId);
 }
 
 function updateDrag(localX, localY) {
@@ -628,57 +831,114 @@ function updateDrag(localX, localY) {
     return;
   }
 
+  // Během tahu krychle jen sleduje kurzor – do mřížky skočí až při puštění.
   const anchorX = localX - dragState.offsetX;
   const anchorY = localY - dragState.offsetY;
-  const def = CUBE_TYPES[dragState.element.dataset.type];
-  const excludeId = dragState.element.dataset.id;
+  setCubeScreenAnchor(dragState.element, anchorX, anchorY);
 
-  // Nad kvádrem se krychle drží mřížky, mimo něj volně sleduje kurzor a při puštění
-  // se vrátí do zásobníku.
-  const cell = shouldSnapToCuboid(anchorX, anchorY)
-    ? findNearestCell(anchorX, anchorY, def.subSize, excludeId)
-    : null;
-
-  if (cell) {
-    setCubeGridPosition(dragState.element, cell.sx, cell.sy, cell.sz);
-  } else {
-    setCubeScreenAnchor(dragState.element, anchorX, anchorY);
+  if (dragState.fromStack) {
+    setCubeVisibility(dragState.element, false);
+    if (dragState.ghost) {
+      dragState.ghost.style.visibility = "visible";
+    }
   }
 
   bringToFront(dragState.element);
 }
 
-function endDrag() {
+function endDrag(clientX, clientY) {
   if (!dragState) {
     return;
   }
 
-  const { element } = dragState;
+  const { element, fromStack, offsetX, offsetY } = dragState;
   const def = CUBE_TYPES[element.dataset.type];
   const id = element.dataset.id;
-  const anchor = getCubeScreenAnchor(element);
+  const point = getLocalPoint(clientX, clientY);
+  const anchorX = point.x - offsetX;
+  const anchorY = point.y - offsetY;
 
-  const cell = shouldSnapToCuboid(anchor.x, anchor.y)
-    ? findNearestCell(anchor.x, anchor.y, def.subSize, id)
-    : null;
+  const pointerInBoard = isPointerInBoard(clientX, clientY);
+  const cell = resolveSnapCell(
+    anchorX,
+    anchorY,
+    point.x,
+    point.y,
+    def.subSize,
+    id,
+    fromStack,
+    pointerInBoard,
+  );
 
+  clearDragGhost();
   element.classList.remove("is-dragging");
   placedCubesLayer.classList.remove("is-dragging");
   diagram.classList.remove("is-dragging");
   dragState = null;
 
-  // Krychle existuje jen v mřížce. Puštěná mimo kvádr se vrací do zásobníku.
-  if (!cell) {
+  const dropOnStack = isPointerInStack(clientX, clientY);
+  const dropOutsideBoard = fromStack && !pointerInBoard;
+
+  // Krychle existuje jen v mřížce. Puštěná mimo kvádr nebo zpět do zásobníku mizí.
+  if (dropOnStack || dropOutsideBoard || !cell) {
     clearOccupied(id);
-    element.remove();
+    removePlacedCube(element);
     sortPlacedCubes();
     return;
   }
 
+  setCubeVisibility(element, true);
   setCubeGridPosition(element, cell.sx, cell.sy, cell.sz);
   markOccupied(cell.sx, cell.sy, cell.sz, def.subSize, id);
   sortPlacedCubes();
 }
+
+const dragMoveOptions = { passive: false, capture: true };
+const dragEndOptions = { capture: true };
+
+function stopDragListeners() {
+  window.removeEventListener("pointermove", handleDragPointerMove, dragMoveOptions);
+  window.removeEventListener("pointerup", handleDragPointerUp, dragEndOptions);
+  window.removeEventListener("pointercancel", handleDragPointerUp, dragEndOptions);
+}
+
+function handleDragPointerMove(event) {
+  if (!dragState || dragState.pointerId !== event.pointerId) {
+    return;
+  }
+
+  event.preventDefault();
+  updateDragGhost(event.clientX, event.clientY);
+  const point = getLocalPoint(event.clientX, event.clientY);
+  updateDrag(point.x, point.y);
+}
+
+function handleDragPointerUp(event) {
+  if (!dragState || dragState.pointerId !== event.pointerId) {
+    return;
+  }
+
+  stopDragListeners();
+  endDrag(event.clientX, event.clientY);
+}
+
+function beginDragTracking(pointerId) {
+  dragState.pointerId = pointerId;
+  window.addEventListener("pointermove", handleDragPointerMove, dragMoveOptions);
+  window.addEventListener("pointerup", handleDragPointerUp, dragEndOptions);
+  window.addEventListener("pointercancel", handleDragPointerUp, dragEndOptions);
+}
+
+cubeStack.addEventListener("pointerdown", (event) => {
+  const stackCube = event.target.closest(".stack-cube");
+  if (!stackCube || !cubeStack.contains(stackCube)) {
+    return;
+  }
+
+  event.preventDefault();
+  startDragFromStack(stackCube.dataset.type, event.clientX, event.clientY, stackCube);
+  beginDragTracking(event.pointerId);
+});
 
 placedCubesLayer.addEventListener("pointerdown", (event) => {
   const placedCube = pickPlacedCubeFromEvent(event);
@@ -690,51 +950,8 @@ placedCubesLayer.addEventListener("pointerdown", (event) => {
   event.stopPropagation();
   const point = getLocalPoint(event.clientX, event.clientY);
   startDragPlacedCube(placedCube, point.x, point.y);
-  dragState.pointerId = event.pointerId;
-  diagram.setPointerCapture(event.pointerId);
+  beginDragTracking(event.pointerId);
 });
-
-diagram.addEventListener("pointerdown", (event) => {
-  if (event.target.closest(".placed-cube")) {
-    return;
-  }
-
-  const stackCube = event.target.closest(".stack-cube");
-  if (!stackCube) {
-    return;
-  }
-
-  event.preventDefault();
-  const point = getLocalPoint(event.clientX, event.clientY);
-  const type = stackCube.dataset.type;
-  startDragFromStack(type, point.x, point.y);
-  dragState.pointerId = event.pointerId;
-  diagram.setPointerCapture(event.pointerId);
-});
-
-diagram.addEventListener("pointermove", (event) => {
-  if (!dragState || dragState.pointerId !== event.pointerId) {
-    return;
-  }
-
-  event.preventDefault();
-  const point = getLocalPoint(event.clientX, event.clientY);
-  updateDrag(point.x, point.y);
-});
-
-function finishPointer(event) {
-  if (!dragState || dragState.pointerId !== event.pointerId) {
-    return;
-  }
-
-  if (diagram.hasPointerCapture(event.pointerId)) {
-    diagram.releasePointerCapture(event.pointerId);
-  }
-  endDrag();
-}
-
-diagram.addEventListener("pointerup", finishPointer);
-diagram.addEventListener("pointercancel", finishPointer);
 
 function createLine(x1, y1, x2, y2, options = {}) {
   const line = document.createElementNS(SVG_NS, "line");
@@ -810,11 +1027,30 @@ function getFitScaleForCuboidSize(widthDm, depthDm, heightDm) {
 }
 
 function getFitScale() {
+  // Stabilní měřítko podle celého diagramu – stejná velikost krychlí v módu kvádr
+  // i ve volné ploše při 100 % zoomu. ViewBox v módu kvádr ořízneme na obsah zvlášť.
   const available = getAvailableDiagramSize();
   return Math.min(
     (available.width * VIEWPORT_SAFETY) / DIAGRAM_WIDTH,
     (available.height * VIEWPORT_SAFETY) / DIAGRAM_HEIGHT,
   );
+}
+
+// Zásobník drží stejnou velikost jako položené krychle při minimálním přiblížení.
+function updateStackCubeSizes() {
+  const fitScale = getFitScale();
+  const cmW = (CUBE_PROJ_WIDTH + CUBE_PROJ_DEPTH) * fitScale;
+  const cmH = (CUBE_PROJ_HEIGHT + CUBE_PROJ_DEPTH) * fitScale;
+  const mmW = cmW / SUB;
+  const mmH = cmH / SUB;
+  const root = document.documentElement;
+
+  root.style.setProperty("--stack-cm3-w", `${cmW}px`);
+  root.style.setProperty("--stack-cm3-h", `${cmH}px`);
+  root.style.setProperty("--stack-mm3-w", `${mmW}px`);
+  root.style.setProperty("--stack-mm3-h", `${mmH}px`);
+  // Malá mm³ krychle potřebuje větší úchopnou plochu.
+  root.style.setProperty("--stack-mm3-hit", `${Math.max(36, mmW * 4)}px`);
 }
 
 function getMaxCuboidDm() {
@@ -871,7 +1107,8 @@ function randomInt(min, max) {
 }
 
 function clearPlacedCubes() {
-  placedCubesLayer.replaceChildren();
+  placedCubeFills.replaceChildren();
+  placedCubeStrokes.replaceChildren();
   occupancy.clear();
 }
 
@@ -885,75 +1122,68 @@ function updateToolbarModeState() {
   freePanel.hidden = !isFreeSurfaceMode;
 }
 
-function getStackLocalBounds() {
-  let minX = Number.POSITIVE_INFINITY;
-  let maxX = Number.NEGATIVE_INFINITY;
-  let minY = Number.POSITIVE_INFINITY;
-  let maxY = Number.NEGATIVE_INFINITY;
+function getActiveZoom() {
+  return isFreeSurfaceMode ? freeZoom : 1;
+}
 
-  cubeStack.querySelectorAll(".stack-cube").forEach((stackCube) => {
-    const box = stackCube.getBBox();
-    minX = Math.min(minX, box.x);
-    maxX = Math.max(maxX, box.x + box.width);
-    minY = Math.min(minY, box.y);
-    maxY = Math.max(maxY, box.y + box.height);
-  });
+function syncZoomControls() {
+  const pct = Math.round(freeZoom * 100);
+  zoomSlider.value = String(pct);
+  zoomSlider.setAttribute("aria-valuenow", String(pct));
+  zoomSlider.setAttribute("aria-valuetext", `${pct} procent`);
+  zoomOutBtn.disabled = freeZoom <= FREE_ZOOM_MIN + 1e-9;
+  zoomInBtn.disabled = freeZoom >= FREE_ZOOM_MAX - 1e-9;
+}
 
-  if (!Number.isFinite(minX)) {
-    return { ...STACK_CONTENT_BOUNDS };
+function applyBoardTransformCss() {
+  diagramWrap.style.setProperty("--board-pan-x", `${freePan.x}px`);
+  diagramWrap.style.setProperty("--board-pan-y", `${freePan.y}px`);
+  diagramWrap.style.setProperty("--board-zoom", String(getActiveZoom()));
+}
+
+function resetBoardPan() {
+  freePan = { x: 0, y: 0 };
+  panDrag = null;
+  boardPanCatch.classList.remove("is-dragging-pan");
+  applyBoardTransformCss();
+}
+
+function setPanMode(on) {
+  isPanMode = on;
+  canvasPanToggle.setAttribute("aria-pressed", on ? "true" : "false");
+  canvasPanToggle.classList.toggle("is-pressed", on);
+
+  if (on) {
+    boardPanCatch.removeAttribute("hidden");
+    boardPanCatch.setAttribute("aria-hidden", "false");
+  } else {
+    boardPanCatch.setAttribute("hidden", "");
+    boardPanCatch.setAttribute("aria-hidden", "true");
+    boardPanCatch.classList.remove("is-dragging-pan");
+    panDrag = null;
   }
-
-  return { minX, minY, maxX, maxY };
 }
 
-function getStackBounds() {
-  const bbox = cubeStack.getBBox();
-  return {
-    minX: bbox.x,
-    minY: bbox.y,
-    maxX: bbox.x + bbox.width,
-    maxY: bbox.y + bbox.height,
-  };
-}
-
-function resetStackPosition() {
-  cubeStack.removeAttribute("transform");
+function setFreeZoom(zoom) {
+  freeZoom = Math.min(FREE_ZOOM_MAX, Math.max(FREE_ZOOM_MIN, zoom));
+  syncZoomControls();
+  applyBoardTransformCss();
 }
 
 function resetCuboidOrigin() {
   cuboidOrigin = { ...DEFAULT_CUBOID_ORIGIN };
 }
 
-function centerFreeSurfaceLayoutHorizontally() {
-  resetCuboidOrigin();
-  resetStackPosition();
-
-  const cuboidBounds = getCuboidScreenBounds();
-  const stackBounds = getStackLocalBounds();
-  const targetCenterX = (
-    Math.min(cuboidBounds.minX, stackBounds.minX) +
-    Math.max(cuboidBounds.maxX, stackBounds.maxX)
-  ) / 2;
-
-  cuboidOrigin.x += targetCenterX - (cuboidBounds.minX + cuboidBounds.maxX) / 2;
-
-  const stackBoundsAfterCuboidShift = getStackLocalBounds();
-  const stackOffsetX = targetCenterX - (stackBoundsAfterCuboidShift.minX + stackBoundsAfterCuboidShift.maxX) / 2;
-  if (Math.abs(stackOffsetX) > 0.01) {
-    cubeStack.setAttribute("transform", `translate(${stackOffsetX}, 0)`);
-  }
-}
-
 function updateViewBox() {
-  const available = getAvailableDiagramSize();
+  // Základní měřítko je vždy stejné jako v módu kvádr. Ve volné ploše ho pak
+  // násobí CSS zoom (min. 100 % = stejná velikost krychlí).
+  const fitScale = getFitScale();
+  updateStackCubeSizes();
 
   if (isFreeSurfaceMode) {
     const bounds = getContentBounds();
     const contentW = bounds.maxX - bounds.minX;
     const contentH = bounds.maxY - bounds.minY;
-    // Stejné měřítko jako v módu kvádr – krychle mají na obrazovce stejnou velikost,
-    // i když je volná plocha větší (případně se plocha posouvá).
-    const fitScale = getFitScale();
     const displayWidth = contentW * fitScale;
     const displayHeight = contentH * fitScale;
 
@@ -967,26 +1197,29 @@ function updateViewBox() {
     diagramBg.setAttribute("height", String(contentH));
     diagramWrap.style.width = `${displayWidth}px`;
     diagramWrap.style.height = `${displayHeight}px`;
+    applyBoardTransformCss();
     return;
   }
 
-  const fitScale = Math.min(
-    (available.width * VIEWPORT_SAFETY) / DIAGRAM_WIDTH,
-    (available.height * VIEWPORT_SAFETY) / DIAGRAM_HEIGHT,
-  );
-  const displayWidth = DIAGRAM_WIDTH * fitScale;
-  const displayHeight = DIAGRAM_HEIGHT * fitScale;
+  // Zásobník je v levém panelu – viewBox ořízneme na kvádr, ať pravý box není
+  // z poloviny prázdný (dřívější místo pro SVG zásobník) a šlo do něj pohodlně pokládat.
+  const bounds = getContentBounds();
+  const contentW = bounds.maxX - bounds.minX;
+  const contentH = bounds.maxY - bounds.minY;
+  const displayWidth = contentW * fitScale;
+  const displayHeight = contentH * fitScale;
 
-  diagram.setAttribute("viewBox", `0 0 ${DIAGRAM_WIDTH} ${DIAGRAM_HEIGHT}`);
+  diagram.setAttribute("viewBox", `${bounds.minX} ${bounds.minY} ${contentW} ${contentH}`);
   diagram.setAttribute("preserveAspectRatio", "xMidYMid meet");
   diagram.style.width = `${displayWidth}px`;
   diagram.style.height = `${displayHeight}px`;
-  diagramBg.setAttribute("x", "0");
-  diagramBg.setAttribute("y", "0");
-  diagramBg.setAttribute("width", String(DIAGRAM_WIDTH));
-  diagramBg.setAttribute("height", String(DIAGRAM_HEIGHT));
+  diagramBg.setAttribute("x", String(bounds.minX));
+  diagramBg.setAttribute("y", String(bounds.minY));
+  diagramBg.setAttribute("width", String(contentW));
+  diagramBg.setAttribute("height", String(contentH));
   diagramWrap.style.width = `${displayWidth}px`;
   diagramWrap.style.height = `${displayHeight}px`;
+  applyBoardTransformCss();
 }
 
 function setStaticLayerVisible(visible) {
@@ -1004,28 +1237,12 @@ function isFreeSurfaceCuboid(widthDm, depthDm, heightDm) {
 
 function applyFreeSurfaceCuboid() {
   CUBOID = { ...FREE_SURFACE_CUBOID };
-  centerFreeSurfaceLayoutHorizontally();
+  resetCuboidOrigin();
   clearPlacedCubes();
   resetVolumeQuiz();
   renderCuboidWireframe();
 }
 
-function initStackCubeScales() {
-  cubeStack.querySelectorAll(".stack-cube").forEach((stackCube) => {
-    const type = stackCube.dataset.type;
-    const scale = CUBE_TYPES[type].scale;
-    const use = stackCube.querySelector("use");
-    if (!use) {
-      return;
-    }
-
-    if (type === "cm3") {
-      use.setAttribute("transform", `translate(0 -5) scale(${scale})`);
-    } else {
-      use.setAttribute("transform", `scale(${scale})`);
-    }
-  });
-}
 function applyCuboidDimensions(widthDm, depthDm, heightDm, { clamp = true } = {}) {
   CUBOID = clamp
     ? clampCuboidSize(widthDm, depthDm, heightDm)
@@ -1046,6 +1263,10 @@ function enterFreeSurfaceMode() {
   }
 
   isFreeSurfaceMode = true;
+  freeZoom = FREE_ZOOM_MIN;
+  resetBoardPan();
+  setPanMode(false);
+  syncZoomControls();
   setStaticLayerVisible(true);
   updateToolbarModeState();
   applyFreeSurfaceCuboid();
@@ -1058,8 +1279,11 @@ function exitFreeSurfaceMode() {
   }
 
   isFreeSurfaceMode = false;
+  freeZoom = FREE_ZOOM_MIN;
+  resetBoardPan();
+  setPanMode(false);
+  syncZoomControls();
   resetCuboidOrigin();
-  resetStackPosition();
   setStaticLayerVisible(true);
   updateToolbarModeState();
   renderCuboidWireframe();
@@ -1498,9 +1722,9 @@ function initCuboid() {
 }
 
 initCuboid();
-initStackCubeScales();
 updateToolbarModeState();
 updateCuboidSizeInputs();
+syncZoomControls();
 modeCuboidBtn.addEventListener("click", () => {
   if (isFreeSurfaceMode) {
     generateRandomCuboid();
@@ -1508,6 +1732,75 @@ modeCuboidBtn.addEventListener("click", () => {
 });
 modeFreeBtn.addEventListener("click", enterFreeSurfaceMode);
 newCuboidBtn.addEventListener("click", generateRandomCuboid);
+zoomSlider.addEventListener("input", () => {
+  setFreeZoom(Number(zoomSlider.value) / 100);
+});
+zoomOutBtn.addEventListener("click", () => {
+  setFreeZoom(freeZoom - FREE_ZOOM_STEP);
+});
+zoomInBtn.addEventListener("click", () => {
+  setFreeZoom(freeZoom + FREE_ZOOM_STEP);
+});
+canvasPanToggle.addEventListener("click", () => {
+  if (!isFreeSurfaceMode) {
+    return;
+  }
+  setPanMode(!isPanMode);
+});
+boardPanCatch.addEventListener("pointerdown", (event) => {
+  if (!isPanMode || !isFreeSurfaceMode) {
+    return;
+  }
+
+  event.preventDefault();
+  panDrag = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    originX: freePan.x,
+    originY: freePan.y,
+  };
+  boardPanCatch.classList.add("is-dragging-pan");
+  boardPanCatch.setPointerCapture(event.pointerId);
+});
+boardPanCatch.addEventListener("pointermove", (event) => {
+  if (!panDrag || panDrag.pointerId !== event.pointerId) {
+    return;
+  }
+
+  event.preventDefault();
+  freePan = {
+    x: panDrag.originX + (event.clientX - panDrag.startX),
+    y: panDrag.originY + (event.clientY - panDrag.startY),
+  };
+  applyBoardTransformCss();
+});
+function endBoardPanDrag(event) {
+  if (!panDrag || panDrag.pointerId !== event.pointerId) {
+    return;
+  }
+
+  if (boardPanCatch.hasPointerCapture(event.pointerId)) {
+    boardPanCatch.releasePointerCapture(event.pointerId);
+  }
+  panDrag = null;
+  boardPanCatch.classList.remove("is-dragging-pan");
+}
+boardPanCatch.addEventListener("pointerup", endBoardPanDrag);
+boardPanCatch.addEventListener("pointercancel", endBoardPanDrag);
+diagram.addEventListener(
+  "wheel",
+  (event) => {
+    if (!isFreeSurfaceMode) {
+      return;
+    }
+
+    event.preventDefault();
+    const direction = event.deltaY > 0 ? -FREE_ZOOM_STEP : FREE_ZOOM_STEP;
+    setFreeZoom(freeZoom + direction);
+  },
+  { passive: false },
+);
 document.querySelectorAll(".step-btn[data-dim-input]").forEach((button) => {
   button.addEventListener("click", () => {
     const input = document.getElementById(button.dataset.dimInput);
